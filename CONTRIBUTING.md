@@ -18,6 +18,12 @@ reported the issue. Please try to include as much information as you can. Detail
 * Any modifications you've made relevant to the bug
 * Anything unusual about your environment or deployment
 
+Here is a list of tags to label issues and help us triage them:
+* question: A question on the library. Consider starting a [discussion](https://github.com/awslabs/aws-data-wrangler/discussions) instead
+* bug: An error encountered when using the library
+* feature: A completely new idea not currently covered by the library
+* enhancement: A suggestion to enhance an existing feature
+
 ## Contributing via Pull Requests
 
 Contributions via pull requests are much appreciated. Before sending us a pull request, please ensure that:
@@ -37,6 +43,8 @@ To send us a pull request, please:
 
 GitHub provides additional document on [forking a repository](https://help.github.com/articles/fork-a-repo/) and
 [creating a pull request](https://help.github.com/articles/creating-a-pull-request/).
+
+*Note: An automated Code Build is triggered with every pull request. To skip it, add the prefix `[skip-ci]` to your commit message.*  
 
 ## Finding contributions to work on
 
@@ -84,7 +92,7 @@ You can choose from three different environments to test your fixes/changes, bas
 ### Mocked test environment
 
 * Pick up a Linux or MacOS.
-* Install Python 3.7, 3.8 or 3.9
+* Install Python 3.7, 3.8 or 3.9 with [poetry](https://github.com/python-poetry/poetry) for package management
 * Fork the AWS Data Wrangler repository and clone that into your development environment
 * Go to the project's directory create a Python's virtual environment for the project
 
@@ -96,7 +104,7 @@ or
 
 * Install dependencies:
 
-``pip install -r requirements-dev.txt``
+``poetry install --extras "sqlserver"``
 
 * Run the validation script:
 
@@ -115,7 +123,7 @@ or
 **DISCLAIMER**: Make sure you know what you are doing. These steps will charge some services on your AWS account and require a minimum security skill to keep your environment safe.
 
 * Pick up a Linux or MacOS.
-* Install Python 3.7, 3.8 or 3.9
+* Install Python 3.7, 3.8 or 3.9 with [poetry](https://github.com/python-poetry/poetry) for package management
 * Fork the AWS Data Wrangler repository and clone that into your development environment
 * Go to the project's directory create a Python's virtual environment for the project
 
@@ -127,23 +135,31 @@ or
 
 * Install dependencies:
 
-``pip install -r requirements-dev.txt``
+``poetry install --extras "sqlserver"``
 
-* [OPTIONAL] Set AWS_DEFAULT_REGION to define the region the Data Lake Test envrioment will deploy into. You may want to choose a region which you don't currently use:
+* Go to the ``test_infra`` directory
+
+``cd test_infra``
+
+* Install CDK dependencies:
+
+``poetry install``
+
+* [OPTIONAL] Set AWS_DEFAULT_REGION to define the region the Data Lake Test environment will deploy into. You may want to choose a region which you don't currently use:
 
 ``export AWS_DEFAULT_REGION=ap-northeast-1``
 
-* Go to the ``cloudformation`` directory
+* Go to the ``scripts`` directory
 
-``cd cloudformation``
+``cd scripts``
 
-* Deploy the Cloudformation template `base.yaml`
+* Deploy the `base` CDK stack
 
-``./deploy-base.sh``
+``./deploy-stack.sh base``
 
 * Return to the project root directory
 
-``cd ..``
+``cd ../../``
 
 * Run the validation script:
 
@@ -159,7 +175,7 @@ or
 
 * [OPTIONAL] To remove the base test environment cloud formation stack post testing:
 
-``./cloudformation/delete-base.sh``
+``./test_infra/scripts/delete-stack.sh base``
 
 ### Full test environment
 
@@ -168,7 +184,7 @@ or
 **DISCLAIMER**: This environment contains Aurora MySQL, Aurora PostgreSQL and Redshift (single-node) clusters which will incur cost while running.
 
 * Pick up a Linux or MacOS.
-* Install Python 3.7, 3.8 or 3.9
+* Install Python 3.7, 3.8 or 3.9 with [poetry](https://github.com/python-poetry/poetry) for package management
 * Fork the AWS Data Wrangler repository and clone that into your development environment
 * Go to the project's directory create a Python's virtual environment for the project
 
@@ -176,20 +192,36 @@ or
 
 * Then run the command bellow to install all dependencies:
 
-``pip install -r requirements-dev.txt``
+``poetry install --extras "sqlserver"``
 
-* [OPTIONAL] Set AWS_DEFAULT_REGION to define the region the Full Test envrioment will deploy into. You may want to choose a region which you don't currently use:
+* Go to the ``test_infra`` directory
+
+``cd test_infra``
+
+* Install CDK dependencies:
+
+``poetry install``
+
+* [OPTIONAL] Set AWS_DEFAULT_REGION to define the region the Full Test environment will deploy into. You may want to choose a region which you don't currently use:
 
 ``export AWS_DEFAULT_REGION=ap-northeast-1``
 
-* Go to the ``cloudformation`` directory
+* Go to the ``scripts`` directory
 
-``cd cloudformation``
+``cd scripts``
 
-* Deploy the Cloudformation templates `base.yaml` and `databases.yaml`. This step could take about 15 minutes to deploy.
+* Deploy the `base` and `databases` CDK stacks. This step could take about 15 minutes to deploy.
 
-``./deploy-base.sh``
-``./deploy-databases.sh``
+``./deploy-stack.sh base``
+``./deploy-stack.sh databases``
+
+* [OPTIONAL] Deploy the `lakeformation` CDK stack (if you need to test against the AWS Lake Formation Service). You must ensure Lake Formation is enabled in the account.
+
+``./deploy-stack.sh lakeformation``
+
+* [OPTIONAL] Deploy the `opensearch` CDK stack (if you need to test against the Amazon OpenSearch Service). This step could take about 15 minutes to deploy.
+
+``./deploy-stack.sh opensearch``
 
 * Go to the `EC2 -> SecurityGroups` console, open the `aws-data-wrangler-*` security group and configure to accept your IP from any TCP port.
   - Alternatively run:
@@ -204,7 +236,7 @@ or
 
 * Return to the project root directory
 
-``cd ..``
+``cd ../../``
 
 * [OPTIONAL] If you intend to run all test, you also need to make sure that you have Amazon QuickSight activated and your AWS user must be register on that.
 
@@ -220,15 +252,15 @@ or
 
 ``pytest -n 8 tests/test_db.py``
 
-* To run all data lake test functions for all python versions (Only if Amazon QuickSight is activated):
+* To run all data lake test functions for all python versions (Only if Amazon QuickSight is activated and Amazon OpenSearch template is deployed):
 
 ``./test.sh``
 
 * [OPTIONAL] To remove the base test environment cloud formation stack post testing:
 
-``./cloudformation/delete-base.sh``
+``./test_infra/scripts/delete-stack.sh base``
 
-``./cloudformation/delete-databases.sh``
+``./test_infra/scripts/delete-stack.sh databases``
 
 ## Recommended Visual Studio Code Recommended setting
 

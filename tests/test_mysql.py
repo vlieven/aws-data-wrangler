@@ -5,6 +5,7 @@ import pandas as pd
 import pyarrow as pa
 import pymysql
 import pytest
+from pymysql.cursors import SSCursor
 
 import awswrangler as wr
 
@@ -20,8 +21,23 @@ def mysql_con():
     con.close()
 
 
-def test_connection():
-    wr.mysql.connect("aws-data-wrangler-mysql", connect_timeout=10).close()
+@pytest.fixture(scope="function")
+def mysql_con_ssl():
+    con = wr.mysql.connect("aws-data-wrangler-mysql-ssl")
+    yield con
+    con.close()
+
+
+@pytest.fixture(scope="function")
+def mysql_con_sscursor():
+    con = wr.mysql.connect("aws-data-wrangler-mysql", cursorclass=SSCursor)
+    yield con
+    con.close()
+
+
+@pytest.mark.parametrize("connection", ["aws-data-wrangler-mysql", "aws-data-wrangler-mysql-ssl"])
+def test_connection(connection):
+    wr.mysql.connect(connection, connect_timeout=10).close()
 
 
 def test_read_sql_query_simple(databases_parameters):
@@ -37,9 +53,25 @@ def test_read_sql_query_simple(databases_parameters):
     assert df.shape == (1, 1)
 
 
+def test_conn_cursor():
+    con = wr.mysql.connect("aws-data-wrangler-mysql", cursorclass=SSCursor)
+
+    assert con.cursorclass == SSCursor
+
+
 def test_to_sql_simple(mysql_table, mysql_con):
     df = pd.DataFrame({"c0": [1, 2, 3], "c1": ["foo", "boo", "bar"]})
     wr.mysql.to_sql(df, mysql_con, mysql_table, "test", "overwrite", True)
+
+
+def test_to_sql_simple_sscursor(mysql_table, mysql_con_sscursor):
+    df = pd.DataFrame({"c0": [1, 2, 3], "c1": ["foo", "boo", "bar"]})
+    wr.mysql.to_sql(df, mysql_con_sscursor, mysql_table, "test", "overwrite", True)
+
+
+def test_to_sql_simple_ssl(mysql_table, mysql_con_ssl):
+    df = pd.DataFrame({"c0": [1, 2, 3], "c1": ["foo", "boo", "bar"]})
+    wr.mysql.to_sql(df, mysql_con_ssl, mysql_table, "test", "overwrite", True)
 
 
 def test_sql_types(mysql_table, mysql_con):

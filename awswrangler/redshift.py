@@ -1,4 +1,5 @@
 """Amazon Redshift Module."""
+# pylint: disable=too-many-lines
 
 import logging
 import uuid
@@ -30,10 +31,31 @@ def _validate_connection(con: redshift_connector.Connection) -> None:
         )
 
 
-def _drop_table(cursor: redshift_connector.Cursor, schema: Optional[str], table: str) -> None:
+def _begin_transaction(cursor: redshift_connector.Cursor) -> None:
+    sql = "BEGIN TRANSACTION"
+    _logger.debug("Begin transaction query:\n%s", sql)
+    cursor.execute(sql)
+
+
+def _drop_table(cursor: redshift_connector.Cursor, schema: Optional[str], table: str, cascade: bool = False) -> None:
     schema_str = f'"{schema}".' if schema else ""
-    sql = f'DROP TABLE IF EXISTS {schema_str}"{table}"'
+    cascade_str = " CASCADE" if cascade else ""
+    sql = f'DROP TABLE IF EXISTS {schema_str}"{table}"' f"{cascade_str}"
     _logger.debug("Drop table query:\n%s", sql)
+    cursor.execute(sql)
+
+
+def _truncate_table(cursor: redshift_connector.Cursor, schema: Optional[str], table: str) -> None:
+    schema_str = f'"{schema}".' if schema else ""
+    sql = f'TRUNCATE TABLE {schema_str}"{table}"'
+    _logger.debug("Truncate table query:\n%s", sql)
+    cursor.execute(sql)
+
+
+def _delete_all(cursor: redshift_connector.Cursor, schema: Optional[str], table: str) -> None:
+    schema_str = f'"{schema}".' if schema else ""
+    sql = f'DELETE FROM {schema_str}"{table}"'
+    _logger.debug("Delete query:\n%s", sql)
     cursor.execute(sql)
 
 
@@ -117,6 +139,18 @@ def _copy(
     cursor.execute(sql)
 
 
+def _lock(
+    cursor: redshift_connector.Cursor,
+    table_names: List[str],
+    schema: Optional[str] = None,
+) -> None:
+    fmt = '"{schema}"."{table}"' if schema else '"{table}"'
+    tables = ", ".join([fmt.format(schema=schema, table=table) for table in table_names])
+    sql: str = f"LOCK {tables};\n"
+    _logger.debug("lock query:\n%s", sql)
+    cursor.execute(sql)
+
+
 def _upsert(
     cursor: redshift_connector.Cursor,
     table: str,
@@ -176,7 +210,7 @@ def _redshift_types_from_path(
     parquet_infer_sampling: float,
     path_suffix: Optional[str],
     path_ignore_suffix: Optional[str],
-    use_threads: bool,
+    use_threads: Union[bool, int],
     boto3_session: Optional[boto3.Session],
     s3_additional_kwargs: Optional[Dict[str, str]],
 ) -> Dict[str, str]:
@@ -202,13 +236,15 @@ def _redshift_types_from_path(
     return redshift_types
 
 
-def _create_table(
+def _create_table(  # pylint: disable=too-many-locals,too-many-arguments
     df: Optional[pd.DataFrame],
     path: Optional[Union[str, List[str]]],
+    con: redshift_connector.Connection,
     cursor: redshift_connector.Cursor,
     table: str,
     schema: str,
     mode: str,
+    overwrite_method: str,
     index: bool,
     dtype: Optional[Dict[str, str]],
     diststyle: str,
@@ -221,12 +257,30 @@ def _create_table(
     parquet_infer_sampling: float = 1.0,
     path_suffix: Optional[str] = None,
     path_ignore_suffix: Optional[str] = None,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Optional[str]]:
     if mode == "overwrite":
-        _drop_table(cursor=cursor, schema=schema, table=table)
+        if overwrite_method == "truncate":
+            try:
+                # Truncate commits current transaction, if successful.
+                # Fast, but not atomic.
+                _truncate_table(cursor=cursor, schema=schema, table=table)
+            except redshift_connector.error.ProgrammingError as e:
+                # Caught "relation does not exist".
+                if e.args[0]["C"] != "42P01":  # pylint: disable=invalid-sequence-index
+                    raise e
+                _logger.debug(str(e))
+                con.rollback()
+            _begin_transaction(cursor=cursor)
+        elif overwrite_method == "delete":
+            if _does_table_exist(cursor=cursor, schema=schema, table=table):
+                # Atomic, but slow.
+                _delete_all(cursor=cursor, schema=schema, table=table)
+        else:
+            # Fast, atomic, but either fails if there are any dependent views or, in cascade mode, deletes them.
+            _drop_table(cursor=cursor, schema=schema, table=table, cascade=bool(overwrite_method == "cascade"))
     elif _does_table_exist(cursor=cursor, schema=schema, table=table) is True:
         if mode == "upsert":
             guid: str = uuid.uuid4().hex
@@ -288,7 +342,7 @@ def _create_table(
 def _read_parquet_iterator(
     path: str,
     keep_files: bool,
-    use_threads: bool,
+    use_threads: Union[bool, int],
     categories: Optional[List[str]],
     chunked: Union[bool, int],
     boto3_session: Optional[boto3.Session],
@@ -325,7 +379,16 @@ def connect(
 
     Note
     ----
-    You MUST pass a `connection` OR `secret_id`
+    You MUST pass a `connection` OR `secret_id`.
+    Here is an example of the secret structure in Secrets Manager:
+    {
+    "host":"my-host.us-east-1.redshift.amazonaws.com",
+    "username":"test",
+    "password":"test",
+    "engine":"redshift",
+    "port":"5439",
+    "dbname": "mydb"
+    }
 
 
     https://github.com/aws/amazon-redshift-python-driver
@@ -335,7 +398,7 @@ def connect(
     connection : Optional[str]
         Glue Catalog Connection name.
     secret_id: Optional[str]:
-        Specifies the secret containing the version that you want to retrieve.
+        Specifies the secret containing the connection details that you want to retrieve.
         You can specify either the Amazon Resource Name (ARN) or the friendly name of the secret.
     catalog_id : str, optional
         The ID of the Data Catalog.
@@ -469,7 +532,7 @@ def connect_temp(
     Examples
     --------
     >>> import awswrangler as wr
-    >>> con = wr.redshift.connect("MY_GLUE_CONNECTION")
+    >>> con = wr.redshift.connect_temp(cluster_identifier="my-cluster", user="test")
     >>> with con.cursor() as cursor:
     >>>     cursor.execute("SELECT 1")
     >>>     print(cursor.fetchall())
@@ -631,12 +694,13 @@ def read_sql_table(
 
 
 @apply_configs
-def to_sql(
+def to_sql(  # pylint: disable=too-many-locals
     df: pd.DataFrame,
     con: redshift_connector.Connection,
     table: str,
     schema: str,
     mode: str = "append",
+    overwrite_method: str = "drop",
     index: bool = False,
     dtype: Optional[Dict[str, str]] = None,
     diststyle: str = "AUTO",
@@ -647,7 +711,9 @@ def to_sql(
     varchar_lengths_default: int = 256,
     varchar_lengths: Optional[Dict[str, int]] = None,
     use_column_names: bool = False,
+    lock: bool = False,
     chunksize: int = 200,
+    commit_transaction: bool = True,
 ) -> None:
     """Write records stored in a DataFrame into Redshift.
 
@@ -669,6 +735,14 @@ def to_sql(
         Schema name
     mode : str
         Append, overwrite or upsert.
+    overwrite_method : str
+        Drop, cascade, truncate, or delete. Only applicable in overwrite mode.
+
+        "drop" - ``DROP ... RESTRICT`` - drops the table. Fails if there are any views that depend on it.
+        "cascade" - ``DROP ... CASCADE`` - drops the table, and all views that depend on it.
+        "truncate" - ``TRUNCATE ...`` - truncates the table, but immediatly commits current
+        transaction & starts a new one, hence the overwrite happens in two transactions and is not atomic.
+        "delete" - ``DELETE FROM ...`` - deletes all rows from the table. Slow relative to the other methods.
     index : bool
         True to store the DataFrame index as a column in the table,
         otherwise False to ignore it.
@@ -696,8 +770,12 @@ def to_sql(
         If set to True, will use the column names of the DataFrame for generating the INSERT SQL Query.
         E.g. If the DataFrame has two columns `col1` and `col3` and `use_column_names` is True, data will only be
         inserted into the database columns `col1` and `col3`.
+    lock : bool
+        True to execute LOCK command inside the transaction to force serializable isolation.
     chunksize: int
         Number of rows which are inserted with each SQL query. Defaults to inserting 200 rows per query.
+    commit_transaction: bool
+        Whether to commit the transaction. True by default.
 
     Returns
     -------
@@ -720,7 +798,7 @@ def to_sql(
 
     """
     if df.empty is True:
-        raise exceptions.EmptyDataFrame()
+        raise exceptions.EmptyDataFrame("DataFrame cannot be empty.")
     _validate_connection(con=con)
     autocommit_temp: bool = con.autocommit
     con.autocommit = False
@@ -729,10 +807,12 @@ def to_sql(
             created_table, created_schema = _create_table(
                 df=df,
                 path=None,
+                con=con,
                 cursor=cursor,
                 table=table,
                 schema=schema,
                 mode=mode,
+                overwrite_method=overwrite_method,
                 index=index,
                 dtype=dtype,
                 diststyle=diststyle,
@@ -758,8 +838,11 @@ def to_sql(
                 _logger.debug("sql: %s", sql)
                 cursor.executemany(sql, (parameters,))
             if table != created_table:  # upsert
+                if lock:
+                    _lock(cursor, [table], schema=schema)
                 _upsert(cursor=cursor, schema=schema, table=table, temp_table=created_table, primary_keys=primary_keys)
-            con.commit()
+            if commit_transaction:
+                con.commit()
     except Exception as ex:
         con.rollback()
         _logger.error(ex)
@@ -777,10 +860,10 @@ def unload_to_files(
     aws_secret_access_key: Optional[str] = None,
     aws_session_token: Optional[str] = None,
     region: Optional[str] = None,
+    unload_format: Optional[str] = None,
     max_file_size: Optional[float] = None,
     kms_key_id: Optional[str] = None,
     manifest: bool = False,
-    use_threads: bool = True,
     partition_cols: Optional[List[str]] = None,
     boto3_session: Optional[boto3.Session] = None,
 ) -> None:
@@ -816,6 +899,9 @@ def unload_to_files(
         same AWS Region as the Amazon Redshift cluster. By default, UNLOAD
         assumes that the target Amazon S3 bucket is located in the same AWS
         Region as the Amazon Redshift cluster.
+    unload_format: str, optional
+        Format of the unloaded S3 objects from the query.
+        Valid values: "CSV", "PARQUET". Case sensitive. Defaults to PARQUET.
     max_file_size : float, optional
         Specifies the maximum size (MB) of files that UNLOAD creates in Amazon S3.
         Specify a decimal value between 5.0 MB and 6200.0 MB. If None, the default
@@ -823,9 +909,6 @@ def unload_to_files(
     kms_key_id : str, optional
         Specifies the key ID for an AWS Key Management Service (AWS KMS) key to be
         used to encrypt data files on Amazon S3.
-    use_threads : bool
-        True to enable concurrent requests, False to disable multiple threads.
-        If enabled os.cpu_count() will be used as the max number of threads.
     manifest : bool
         Unload a manifest file on S3.
     partition_cols: List[str], optional
@@ -851,10 +934,11 @@ def unload_to_files(
 
 
     """
-    path = path if path.endswith("/") else f"{path}/"
+    if unload_format not in [None, "CSV", "PARQUET"]:
+        raise exceptions.InvalidArgumentValue("<unload_format> argument must be 'CSV' or 'PARQUET'")
     session: boto3.Session = _utils.ensure_session(session=boto3_session)
-    s3.delete_objects(path=path, use_threads=use_threads, boto3_session=session)
     with con.cursor() as cursor:
+        format_str: str = unload_format or "PARQUET"
         partition_str: str = f"\nPARTITION BY ({','.join(partition_cols)})" if partition_cols else ""
         manifest_str: str = "\nmanifest" if manifest is True else ""
         region_str: str = f"\nREGION AS '{region}'" if region is not None else ""
@@ -866,7 +950,7 @@ def unload_to_files(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            boto3_session=boto3_session,
+            boto3_session=session,
         )
 
         sql = (
@@ -875,7 +959,7 @@ def unload_to_files(
             f"{auth_str}"
             "ALLOWOVERWRITE\n"
             "PARALLEL ON\n"
-            "FORMAT PARQUET\n"
+            f"FORMAT {format_str}\n"
             "ENCRYPTED"
             f"{kms_key_id_str}"
             f"{partition_str}"
@@ -901,7 +985,7 @@ def unload(
     categories: Optional[List[str]] = None,
     chunked: Union[bool, int] = False,
     keep_files: bool = False,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, str]] = None,
 ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
@@ -921,16 +1005,16 @@ def unload(
     ----
     ``Batching`` (`chunked` argument) (Memory Friendly):
 
-    Will anable the function to return a Iterable of DataFrames instead of a regular DataFrame.
+    Will enable the function to return an Iterable of DataFrames instead of a regular DataFrame.
 
     There are two batching strategies on Wrangler:
 
     - If **chunked=True**, a new DataFrame will be returned for each file in your path/dataset.
 
-    - If **chunked=INTEGER**, Wrangler will iterate on the data by number of rows igual the received INTEGER.
+    - If **chunked=INTEGER**, Wrangler will iterate on the data by number of rows (equal to the received INTEGER).
 
-    `P.S.` `chunked=True` if faster and uses less memory while `chunked=INTEGER` is more precise
-    in number of rows for each Dataframe.
+    `P.S.` `chunked=True` is faster and uses less memory while `chunked=INTEGER` is more precise
+    in the number of rows for each Dataframe.
 
 
     Note
@@ -977,9 +1061,10 @@ def unload(
         If passed will split the data in a Iterable of DataFrames (Memory friendly).
         If `True` wrangler will iterate on the data by files in the most efficient way without guarantee of chunksize.
         If an `INTEGER` is passed Wrangler will iterate on the data by number of rows igual the received INTEGER.
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs:
@@ -1003,6 +1088,7 @@ def unload(
     >>> con.close()
 
     """
+    path = path if path.endswith("/") else f"{path}/"
     session: boto3.Session = _utils.ensure_session(session=boto3_session)
     unload_to_files(
         sql=sql,
@@ -1016,7 +1102,6 @@ def unload(
         max_file_size=max_file_size,
         kms_key_id=kms_key_id,
         manifest=False,
-        use_threads=use_threads,
         boto3_session=session,
     )
     if chunked is False:
@@ -1056,6 +1141,7 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
     aws_session_token: Optional[str] = None,
     parquet_infer_sampling: float = 1.0,
     mode: str = "append",
+    overwrite_method: str = "drop",
     diststyle: str = "AUTO",
     distkey: Optional[str] = None,
     sortstyle: str = "COMPOUND",
@@ -1066,7 +1152,9 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
     serialize_to_json: bool = False,
     path_suffix: Optional[str] = None,
     path_ignore_suffix: Optional[str] = None,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
+    lock: bool = False,
+    commit_transaction: bool = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, str]] = None,
 ) -> None:
@@ -1112,6 +1200,14 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
         The lower, the faster.
     mode : str
         Append, overwrite or upsert.
+    overwrite_method : str
+        Drop, cascade, truncate, or delete. Only applicable in overwrite mode.
+
+        "drop" - ``DROP ... RESTRICT`` - drops the table. Fails if there are any views that depend on it.
+        "cascade" - ``DROP ... CASCADE`` - drops the table, and all views that depend on it.
+        "truncate" - ``TRUNCATE ...`` - truncates the table, but immediatly commits current
+        transaction & starts a new one, hence the overwrite happens in two transactions and is not atomic.
+        "delete" - ``DELETE FROM ...`` - deletes all rows from the table. Slow relative to the other methods.
     diststyle : str
         Redshift distribution styles. Must be in ["AUTO", "EVEN", "ALL", "KEY"].
         https://docs.aws.amazon.com/redshift/latest/dg/t_Distributing_data.html
@@ -1142,15 +1238,18 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
         (e.g. [".csv", "_SUCCESS"]).
         Only has effect during the table creation.
         If None, will try to read all files. (default)
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
+    lock : bool
+        True to execute LOCK command inside the transaction to force serializable isolation.
+    commit_transaction: bool
+        Whether to commit the transaction. True by default.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs:
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
 
     Returns
@@ -1162,11 +1261,11 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
     --------
     >>> import awswrangler as wr
     >>> con = wr.redshift.connect("MY_GLUE_CONNECTION")
-    >>> wr.db.copy_from_files(
+    >>> wr.redshift.copy_from_files(
     ...     path="s3://bucket/my_parquet_files/",
     ...     con=con,
     ...     table="my_table",
-    ...     schema="public"
+    ...     schema="public",
     ...     iam_role="arn:aws:iam::XXX:role/XXX"
     ... )
     >>> con.close()
@@ -1182,10 +1281,12 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
                 parquet_infer_sampling=parquet_infer_sampling,
                 path_suffix=path_suffix,
                 path_ignore_suffix=path_ignore_suffix,
+                con=con,
                 cursor=cursor,
                 table=table,
                 schema=schema,
                 mode=mode,
+                overwrite_method=overwrite_method,
                 diststyle=diststyle,
                 sortstyle=sortstyle,
                 distkey=distkey,
@@ -1199,6 +1300,9 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
                 boto3_session=boto3_session,
                 s3_additional_kwargs=s3_additional_kwargs,
             )
+            if lock and table == created_table:
+                # Lock before copy if copying into target (not temp) table
+                _lock(cursor, [table], schema=schema)
             _copy(
                 cursor=cursor,
                 path=path,
@@ -1212,8 +1316,11 @@ def copy_from_files(  # pylint: disable=too-many-locals,too-many-arguments
                 serialize_to_json=serialize_to_json,
             )
             if table != created_table:  # upsert
+                if lock:
+                    _lock(cursor, [table], schema=schema)
                 _upsert(cursor=cursor, schema=schema, table=table, temp_table=created_table, primary_keys=primary_keys)
-            con.commit()
+            if commit_transaction:
+                con.commit()
     except Exception as ex:
         con.rollback()
         _logger.error(ex)
@@ -1235,6 +1342,7 @@ def copy(  # pylint: disable=too-many-arguments
     index: bool = False,
     dtype: Optional[Dict[str, str]] = None,
     mode: str = "append",
+    overwrite_method: str = "drop",
     diststyle: str = "AUTO",
     distkey: Optional[str] = None,
     sortstyle: str = "COMPOUND",
@@ -1244,7 +1352,8 @@ def copy(  # pylint: disable=too-many-arguments
     varchar_lengths: Optional[Dict[str, int]] = None,
     serialize_to_json: bool = False,
     keep_files: bool = False,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
+    lock: bool = False,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, str]] = None,
     max_rows_by_file: Optional[int] = 10_000_000,
@@ -1301,9 +1410,17 @@ def copy(  # pylint: disable=too-many-arguments
         Useful when you have columns with undetermined or mixed data types.
         Only takes effect if dataset=True.
         (e.g. {'col name': 'bigint', 'col2 name': 'int'})
-    mode : str
+    mode: str
         Append, overwrite or upsert.
-    diststyle : str
+    overwrite_method : str
+        Drop, cascade, truncate, or delete. Only applicable in overwrite mode.
+
+        "drop" - ``DROP ... RESTRICT`` - drops the table. Fails if there are any views that depend on it.
+        "cascade" - ``DROP ... CASCADE`` - drops the table, and all views that depend on it.
+        "truncate" - ``TRUNCATE ...`` - truncates the table, but immediatly commits current
+        transaction & starts a new one, hence the overwrite happens in two transactions and is not atomic.
+        "delete" - ``DELETE FROM ...`` - deletes all rows from the table. Slow relative to the other methods.
+    diststyle: str
         Redshift distribution styles. Must be in ["AUTO", "EVEN", "ALL", "KEY"].
         https://docs.aws.amazon.com/redshift/latest/dg/t_Distributing_data.html
     distkey : str, optional
@@ -1321,15 +1438,16 @@ def copy(  # pylint: disable=too-many-arguments
         Dict of VARCHAR length by columns. (e.g. {"col1": 10, "col5": 200}).
     keep_files : bool
         Should keep stage files?
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
+    lock : bool
+        True to execute LOCK command inside the transaction to force serializable isolation.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs:
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
     max_rows_by_file : int
         Max number of rows in each file.
@@ -1346,12 +1464,12 @@ def copy(  # pylint: disable=too-many-arguments
     >>> import awswrangler as wr
     >>> import pandas as pd
     >>> con = wr.redshift.connect("MY_GLUE_CONNECTION")
-    >>> wr.db.copy(
+    >>> wr.redshift.copy(
     ...     df=pd.DataFrame({'col': [1, 2, 3]}),
     ...     path="s3://bucket/my_parquet_files/",
     ...     con=con,
     ...     table="my_table",
-    ...     schema="public"
+    ...     schema="public",
     ...     iam_role="arn:aws:iam::XXX:role/XXX"
     ... )
     >>> con.close()
@@ -1388,6 +1506,7 @@ def copy(  # pylint: disable=too-many-arguments
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
             mode=mode,
+            overwrite_method=overwrite_method,
             diststyle=diststyle,
             distkey=distkey,
             sortstyle=sortstyle,
@@ -1397,6 +1516,7 @@ def copy(  # pylint: disable=too-many-arguments
             varchar_lengths=varchar_lengths,
             serialize_to_json=serialize_to_json,
             use_threads=use_threads,
+            lock=lock,
             boto3_session=session,
             s3_additional_kwargs=s3_additional_kwargs,
         )

@@ -17,7 +17,11 @@ API_CALL = botocore.client.BaseClient._make_api_call
 logging.getLogger("awswrangler").setLevel(logging.DEBUG)
 
 
-@pytest.mark.parametrize("sanitize_columns,col", [(True, "foo_boo"), (False, "FooBoo")])
+def test_list_buckets() -> None:
+    assert len(wr.s3.list_buckets()) > 0
+
+
+@pytest.mark.parametrize("sanitize_columns,col", [(True, "fooboo"), (False, "FooBoo")])
 def test_sanitize_columns(path, sanitize_columns, col):
     df = pd.DataFrame({"FooBoo": [1, 2, 3]})
 
@@ -323,15 +327,19 @@ def test_prefix_cleanup():
     assert wr.s3._list._prefix_cleanup(glob.escape("foo[]boo")) == glob.escape("foo")
 
 
-def test_prefix_list(path):
+@pytest.mark.parametrize(
+    "s3_additional_kwargs",
+    [None, {"FetchOwner": True}, {"PaginationConfig": {"PageSize": 100}}],
+)
+def test_prefix_list(path, s3_additional_kwargs):
     df = pd.DataFrame({"c0": [0]})
     prefixes = ["foo1boo", "foo2boo", "foo3boo", "foo10boo", "foo*boo", "abc1boo", "foo1abc"]
     paths = [path + p for p in prefixes]
     for p in paths:
         wr.s3.to_parquet(df=df, path=p)
-    assert len(wr.s3.list_objects(path + "*")) == 7
-    assert len(wr.s3.list_objects(path + "foo*")) == 6
-    assert len(wr.s3.list_objects(path + "*boo")) == 6
-    assert len(wr.s3.list_objects(path + "foo?boo")) == 4
-    assert len(wr.s3.list_objects(path + "foo*boo")) == 5
-    assert len(wr.s3.list_objects(path + "foo[12]boo")) == 2
+    assert len(wr.s3.list_objects(path + "*", s3_additional_kwargs=s3_additional_kwargs)) == 7
+    assert len(wr.s3.list_objects(path + "foo*", s3_additional_kwargs=s3_additional_kwargs)) == 6
+    assert len(wr.s3.list_objects(path + "*boo", s3_additional_kwargs=s3_additional_kwargs)) == 6
+    assert len(wr.s3.list_objects(path + "foo?boo", s3_additional_kwargs=s3_additional_kwargs)) == 4
+    assert len(wr.s3.list_objects(path + "foo*boo", s3_additional_kwargs=s3_additional_kwargs)) == 5
+    assert len(wr.s3.list_objects(path + "foo[12]boo", s3_additional_kwargs=s3_additional_kwargs)) == 2

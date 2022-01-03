@@ -1,7 +1,7 @@
 """Amazon S3 Copy Module (PRIVATE)."""
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -16,7 +16,7 @@ _logger: logging.Logger = logging.getLogger(__name__)
 
 def _copy_objects(
     batch: List[Tuple[str, str]],
-    use_threads: bool,
+    use_threads: Union[bool, int],
     boto3_session: boto3.Session,
     s3_additional_kwargs: Optional[Dict[str, Any]],
 ) -> None:
@@ -46,7 +46,7 @@ def merge_datasets(
     target_path: str,
     mode: str = "append",
     ignore_empty: bool = False,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
@@ -79,15 +79,14 @@ def merge_datasets(
         ``append`` (Default), ``overwrite``, ``overwrite_partitions``.
     ignore_empty: bool
         Ignore files with 0 bytes.
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs : Optional[Dict[str, Any]]
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
 
     Returns
@@ -126,7 +125,9 @@ def merge_datasets(
     target_path = target_path[:-1] if target_path[-1] == "/" else target_path
     session: boto3.Session = _utils.ensure_session(session=boto3_session)
 
-    paths: List[str] = list_objects(path=f"{source_path}/", ignore_empty=ignore_empty, boto3_session=session)
+    paths: List[str] = list_objects(  # type: ignore
+        path=f"{source_path}/", ignore_empty=ignore_empty, boto3_session=session
+    )
     _logger.debug("len(paths): %s", len(paths))
     if len(paths) < 1:
         return []
@@ -162,7 +163,7 @@ def copy_objects(
     source_path: str,
     target_path: str,
     replace_filenames: Optional[Dict[str, str]] = None,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
@@ -183,15 +184,14 @@ def copy_objects(
         S3 Path for the target directory.
     replace_filenames : Dict[str, str], optional
         e.g. {"old_name.csv": "new_name.csv", "old_name2.csv": "new_name2.csv"}
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs : Optional[Dict[str, Any]]
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
 
     Returns

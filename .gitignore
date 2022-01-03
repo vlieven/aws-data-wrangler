@@ -1,5 +1,5 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
+*__pycache__/
 *.py[cod]
 *$py.class
 
@@ -26,6 +26,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# poetry
+poetry.toml
+envs.toml
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -47,7 +51,7 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
-.pytest_cache/
+*.pytest_cache/
 test-reports/
 
 # Translations
@@ -90,9 +94,8 @@ celerybeat-schedule
 
 # Environments
 .env
-.venv
-.venv2
-env/
+*venv*/
+*env/
 venv*/
 ENV/
 env.bak/
@@ -145,3 +148,11 @@ building/lambda/arrow
 /docs/build/
 /docs/source/_build/
 /docs/source/stubs/
+
+# Swap
+*.swp
+
+# CDK
+*package-lock.json
+*.cdk.staging
+*cdk.out

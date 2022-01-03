@@ -42,9 +42,17 @@ def test_read_sql_query_simple(databases_parameters):
     assert df.shape == (1, 1)
 
 
-def test_to_sql_simple(redshift_table, redshift_con):
+@pytest.mark.parametrize("overwrite_method", [None, "drop", "cascade", "truncate", "delete"])
+def test_to_sql_simple(redshift_table, redshift_con, overwrite_method):
     df = pd.DataFrame({"c0": [1, 2, 3], "c1": ["foo", "boo", "bar"]})
-    wr.redshift.to_sql(df, redshift_con, redshift_table, "public", "overwrite", True)
+    wr.redshift.to_sql(df, redshift_con, redshift_table, "public", "overwrite", overwrite_method, True)
+
+
+def test_empty_table(redshift_table, redshift_con):
+    with redshift_con.cursor() as cursor:
+        cursor.execute(f"CREATE TABLE public.{redshift_table}(c0 integer not null, c1 integer, primary key(c0));")
+    df = wr.redshift.read_sql_table(table=redshift_table, con=redshift_con, schema="public")
+    assert df.columns.values.tolist() == ["c0", "c1"]
 
 
 def test_sql_types(redshift_table, redshift_con):
@@ -208,7 +216,7 @@ def test_copy_upsert(path, redshift_table, redshift_con, databases_parameters):
     assert len(df.index) + len(df3.index) == len(df4.index)
     assert len(df.columns) == len(df4.columns)
 
-    # UPSERT 2
+    # UPSERT 2 + lock
     wr.redshift.copy(
         df=df3,
         path=path,
@@ -218,6 +226,7 @@ def test_copy_upsert(path, redshift_table, redshift_con, databases_parameters):
         mode="upsert",
         index=False,
         iam_role=databases_parameters["redshift"]["role"],
+        lock=True,
     )
     path = f"{path}upsert/test_redshift_copy_upsert4/"
     df4 = wr.redshift.unload(
@@ -348,6 +357,40 @@ def test_unload_extras(bucket, path, redshift_table, redshift_con, databases_par
     )
     assert len(df.index) == 2
     assert len(df.columns) == 2
+
+
+@pytest.mark.parametrize("unload_format", [None, "CSV", "PARQUET"])
+def test_unload_with_prefix(
+    bucket, path, redshift_table, redshift_con, databases_parameters, kms_key_id, unload_format
+):
+    test_prefix = "my_prefix"
+    table = redshift_table
+    schema = databases_parameters["redshift"]["schema"]
+    df = pd.DataFrame({"id": [1, 2], "name": ["foo", "boo"]})
+    wr.redshift.to_sql(df=df, con=redshift_con, table=table, schema=schema, mode="overwrite", index=False)
+
+    args = {
+        "sql": f"SELECT * FROM {schema}.{table}",
+        "path": f"{path}{test_prefix}",
+        "con": redshift_con,
+        "iam_role": databases_parameters["redshift"]["role"],
+        "region": wr.s3.get_bucket_region(bucket),
+        "max_file_size": 5.0,
+        "kms_key_id": kms_key_id,
+        "unload_format": unload_format,
+    }
+    # Adding a prefix to S3 output files
+    wr.redshift.unload_to_files(**args)
+    filename = wr.s3.list_objects(path=path)[0].split("/")[-1]
+    assert filename.startswith(test_prefix)
+
+    # Prefix becomes part of path with partitioning
+    wr.redshift.unload_to_files(
+        **args,
+        partition_cols=["name"],
+    )
+    object_prefix = wr.s3.list_objects(path=path)[0].split("/")[-3]
+    assert object_prefix == test_prefix
 
 
 def test_to_sql_cast(redshift_table, redshift_con):
@@ -912,3 +955,34 @@ def test_dfs_are_equal_for_different_chunksizes(redshift_table, redshift_con, ch
     df["c1"] = df["c1"].astype("string")
 
     assert df.equals(df2)
+
+
+def test_to_sql_multi_transaction(redshift_table, redshift_con):
+    df = pd.DataFrame({"id": list((range(10))), "val": list(["foo" if i % 2 == 0 else "boo" for i in range(10)])})
+    df2 = pd.DataFrame({"id": list((range(10, 15))), "val": list(["foo" if i % 2 == 0 else "boo" for i in range(5)])})
+
+    wr.redshift.to_sql(
+        df=df,
+        con=redshift_con,
+        schema="public",
+        table=redshift_table,
+        mode="overwrite",
+        index=False,
+        primary_keys=["id"],
+        commit_transaction=False,  # Not committing
+    )
+
+    wr.redshift.to_sql(
+        df=df2,
+        con=redshift_con,
+        schema="public",
+        table=redshift_table,
+        mode="upsert",
+        index=False,
+        primary_keys=["id"],
+        commit_transaction=False,  # Not committing
+    )
+    redshift_con.commit()
+    df3 = wr.redshift.read_sql_query(sql=f"SELECT * FROM public.{redshift_table} ORDER BY id", con=redshift_con)
+    assert len(df.index) + len(df2.index) == len(df3.index)
+    assert len(df.columns) == len(df3.columns)

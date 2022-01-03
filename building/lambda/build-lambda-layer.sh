@@ -14,7 +14,7 @@ export ARROW_HOME=$(pwd)/dist
 export LD_LIBRARY_PATH=$(pwd)/dist/lib:$LD_LIBRARY_PATH
 
 git clone \
-  --branch apache-arrow-3.0.0 \
+  --branch apache-arrow-6.0.0 \
   --single-branch \
   https://github.com/apache/arrow.git
 
@@ -80,7 +80,10 @@ rm -f /aws-data-wrangler/dist/pyarrow_files/pyarrow/libarrow_python.so
 
 cp -r /aws-data-wrangler/dist/pyarrow_files/pyarrow* python/
 
+# Removing nonessential files
+find python -name '*.so' -type f -exec strip "{}" \;
 find python -wholename "*/tests/*" -type f -delete
+find python -regex '^.*\(__pycache__\|\.py[co]\)$' -delete
 
 zip -r9 "${FILENAME}" ./python
 mv "${FILENAME}" dist/

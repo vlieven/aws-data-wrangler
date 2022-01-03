@@ -652,6 +652,7 @@ def _cast_pandas_column(df: pd.DataFrame, col: str, current_type: str, desired_t
         try:
             df[col] = df[col].astype(desired_type)
         except TypeError as ex:
+            _logger.debug("Column: %s", col)
             if "object cannot be converted to an IntegerDtype" not in str(ex):
                 raise ex
             df[col] = (
@@ -700,3 +701,10 @@ def timestream_type_from_pandas(df: pd.DataFrame) -> str:
     pyarrow_type: pa.DataType = list(pyarrow_types.values())[0]
     _logger.debug("pyarrow_type: %s", pyarrow_type)
     return pyarrow2timestream(dtype=pyarrow_type)
+
+
+def get_arrow_timestamp_unit(data_type: pa.lib.DataType) -> Any:
+    """Return unit of pyarrow timestamp. If the pyarrow type is not timestamp then None is returned."""
+    if isinstance(data_type, pa.lib.TimestampType):
+        return data_type.unit
+    return None

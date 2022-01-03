@@ -1,5 +1,4 @@
 """Amazon S3 Read Module (PRIVATE)."""
-
 import datetime
 import logging
 import pprint
@@ -18,6 +17,7 @@ from awswrangler.s3._read import (
     _apply_partitions,
     _get_path_ignore_suffix,
     _get_path_root,
+    _read_dfs_from_multiple_paths,
     _union,
 )
 
@@ -42,13 +42,15 @@ def _read_text_chunked(
     pandas_kwargs: Dict[str, Any],
     s3_additional_kwargs: Optional[Dict[str, str]],
     dataset: bool,
-    use_threads: bool,
+    use_threads: Union[bool, int],
+    version_ids: Optional[Dict[str, str]] = None,
 ) -> Iterator[pd.DataFrame]:
     for path in paths:
         _logger.debug("path: %s", path)
         mode, encoding, newline = _get_read_details(path=path, pandas_kwargs=pandas_kwargs)
         with open_s3_object(
             path=path,
+            version_id=version_ids.get(path) if version_ids else None,
             mode=mode,
             s3_block_size=10_485_760,  # 10 MB (10 * 2**20)
             encoding=encoding,
@@ -64,17 +66,20 @@ def _read_text_chunked(
 
 def _read_text_file(
     path: str,
+    version_id: Optional[str],
     parser_func: Callable[..., pd.DataFrame],
     path_root: Optional[str],
-    boto3_session: Union[boto3.Session, Dict[str, Optional[str]]],
+    boto3_session: Union[boto3.Session, _utils.Boto3PrimitivesType],
     pandas_kwargs: Dict[str, Any],
     s3_additional_kwargs: Optional[Dict[str, str]],
     dataset: bool,
-    use_threads: bool,
+    use_threads: Union[bool, int],
 ) -> pd.DataFrame:
+    boto3_session = _utils.ensure_session(boto3_session)
     mode, encoding, newline = _get_read_details(path=path, pandas_kwargs=pandas_kwargs)
     with open_s3_object(
         path=path,
+        version_id=version_id,
         mode=mode,
         use_threads=use_threads,
         s3_block_size=-1,  # One shot download
@@ -93,7 +98,7 @@ def _read_text(
     path_suffix: Union[str, List[str], None],
     path_ignore_suffix: Union[str, List[str], None],
     ignore_empty: bool,
-    use_threads: bool,
+    use_threads: Union[bool, int],
     last_modified_begin: Optional[datetime.datetime],
     last_modified_end: Optional[datetime.datetime],
     boto3_session: Optional[boto3.Session],
@@ -102,6 +107,7 @@ def _read_text(
     dataset: bool,
     partition_filter: Optional[Callable[[Dict[str, str]], bool]],
     ignore_index: bool,
+    version_id: Optional[Union[str, Dict[str, str]]] = None,
     **pandas_kwargs: Any,
 ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
     if "iterator" in pandas_kwargs:
@@ -136,11 +142,24 @@ def _read_text(
     _logger.debug("args:\n%s", pprint.pformat(args))
     ret: Union[pd.DataFrame, Iterator[pd.DataFrame]]
     if chunksize is not None:
-        ret = _read_text_chunked(paths=paths, chunksize=chunksize, **args)
+        ret = _read_text_chunked(
+            paths=paths, version_ids=version_id if isinstance(version_id, dict) else None, chunksize=chunksize, **args
+        )
     elif len(paths) == 1:
-        ret = _read_text_file(path=paths[0], **args)
+        ret = _read_text_file(
+            path=paths[0], version_id=version_id[paths[0]] if isinstance(version_id, dict) else version_id, **args
+        )
     else:
-        ret = _union(dfs=[_read_text_file(path=p, **args) for p in paths], ignore_index=ignore_index)
+        ret = _union(
+            dfs=_read_dfs_from_multiple_paths(
+                read_func=_read_text_file,
+                paths=paths,
+                version_ids=version_id if isinstance(version_id, dict) else None,
+                use_threads=use_threads,
+                kwargs=args,
+            ),
+            ignore_index=ignore_index,
+        )
     return ret
 
 
@@ -148,8 +167,9 @@ def read_csv(
     path: Union[str, List[str]],
     path_suffix: Union[str, List[str], None] = None,
     path_ignore_suffix: Union[str, List[str], None] = None,
+    version_id: Optional[Union[str, Dict[str, str]]] = None,
     ignore_empty: bool = True,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     last_modified_begin: Optional[datetime.datetime] = None,
     last_modified_end: Optional[datetime.datetime] = None,
     boto3_session: Optional[boto3.Session] = None,
@@ -191,11 +211,15 @@ def read_csv(
     path_ignore_suffix: Union[str, List[str], None]
         Suffix or List of suffixes for S3 keys to be ignored.(e.g. ["_SUCCESS"]).
         If None, will try to read all files. (default)
+    version_id: Optional[Union[str, Dict[str, str]]]
+        Version id of the object or mapping of object path to version id.
+        (e.g. {'s3://bucket/key0': '121212', 's3://bucket/key1': '343434'})
     ignore_empty: bool
         Ignore files with 0 bytes.
-    use_threads : bool
+    use_threads : Union[bool, int]
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     last_modified_begin
         Filter the s3 files by the Last modified date of the object.
         The filter is applied only after list all s3 files.
@@ -217,7 +241,7 @@ def read_csv(
         This function MUST return a bool, True to read the partition or False to ignore it.
         Ignored if `dataset=False`.
         E.g ``lambda x: True if x["year"] == "2020" and x["month"] == "1" else False``
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
     pandas_kwargs :
         KEYWORD arguments forwarded to pandas.read_csv(). You can NOT pass `pandas_kwargs` explicit, just add valid
         Pandas arguments in the function call and Wrangler will accept it.
@@ -272,6 +296,7 @@ def read_csv(
         path=path,
         path_suffix=path_suffix,
         path_ignore_suffix=path_ignore_suffix,
+        version_id=version_id,
         ignore_empty=ignore_empty,
         use_threads=use_threads,
         boto3_session=boto3_session,
@@ -290,8 +315,9 @@ def read_fwf(
     path: Union[str, List[str]],
     path_suffix: Union[str, List[str], None] = None,
     path_ignore_suffix: Union[str, List[str], None] = None,
+    version_id: Optional[Union[str, Dict[str, str]]] = None,
     ignore_empty: bool = True,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     last_modified_begin: Optional[datetime.datetime] = None,
     last_modified_end: Optional[datetime.datetime] = None,
     boto3_session: Optional[boto3.Session] = None,
@@ -333,11 +359,15 @@ def read_fwf(
     path_ignore_suffix: Union[str, List[str], None]
         Suffix or List of suffixes for S3 keys to be ignored.(e.g. ["_SUCCESS"]).
         If None, will try to read all files. (default)
+    version_id: Optional[Union[str, Dict[str, str]]]
+        Version id of the object or mapping of object path to version id.
+        (e.g. {'s3://bucket/key0': '121212', 's3://bucket/key1': '343434'})
     ignore_empty: bool
         Ignore files with 0 bytes.
-    use_threads : bool
+    use_threads : Union[bool, int]
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     last_modified_begin
         Filter the s3 files by the Last modified date of the object.
         The filter is applied only after list all s3 files.
@@ -359,7 +389,7 @@ def read_fwf(
         This function MUST return a bool, True to read the partition or False to ignore it.
         Ignored if `dataset=False`.
         E.g ``lambda x: True if x["year"] == "2020" and x["month"] == "1" else False``
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
     pandas_kwargs:
         KEYWORD arguments forwarded to pandas.read_fwf(). You can NOT pass `pandas_kwargs` explicit, just add valid
         Pandas arguments in the function call and Wrangler will accept it.
@@ -413,6 +443,7 @@ def read_fwf(
         path=path,
         path_suffix=path_suffix,
         path_ignore_suffix=path_ignore_suffix,
+        version_id=version_id,
         ignore_empty=ignore_empty,
         use_threads=use_threads,
         boto3_session=boto3_session,
@@ -432,9 +463,10 @@ def read_json(
     path: Union[str, List[str]],
     path_suffix: Union[str, List[str], None] = None,
     path_ignore_suffix: Union[str, List[str], None] = None,
+    version_id: Optional[Union[str, Dict[str, str]]] = None,
     ignore_empty: bool = True,
     orient: str = "columns",
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     last_modified_begin: Optional[datetime.datetime] = None,
     last_modified_end: Optional[datetime.datetime] = None,
     boto3_session: Optional[boto3.Session] = None,
@@ -476,13 +508,17 @@ def read_json(
     path_ignore_suffix: Union[str, List[str], None]
         Suffix or List of suffixes for S3 keys to be ignored.(e.g. ["_SUCCESS"]).
         If None, will try to read all files. (default)
+    version_id: Optional[Union[str, Dict[str, str]]]
+        Version id of the object or mapping of object path to version id.
+        (e.g. {'s3://bucket/key0': '121212', 's3://bucket/key1': '343434'})
     ignore_empty: bool
         Ignore files with 0 bytes.
     orient : str
         Same as Pandas: https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.read_json.html
-    use_threads : bool
+    use_threads : Union[bool, int]
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     last_modified_begin
         Filter the s3 files by the Last modified date of the object.
         The filter is applied only after list all s3 files.
@@ -505,7 +541,7 @@ def read_json(
         This function MUST return a bool, True to read the partition or False to ignore it.
         Ignored if `dataset=False`.
         E.g ``lambda x: True if x["year"] == "2020" and x["month"] == "1" else False``
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/023%20-%20Flexible%20Partitions%20Filter.html
     pandas_kwargs:
         KEYWORD arguments forwarded to pandas.read_json(). You can NOT pass `pandas_kwargs` explicit, just add valid
         Pandas arguments in the function call and Wrangler will accept it.
@@ -563,6 +599,7 @@ def read_json(
         path=path,
         path_suffix=path_suffix,
         path_ignore_suffix=path_ignore_suffix,
+        version_id=version_id,
         ignore_empty=ignore_empty,
         use_threads=use_threads,
         boto3_session=boto3_session,

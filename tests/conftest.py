@@ -128,8 +128,8 @@ def workgroup3(bucket, kms_key):
 
 
 @pytest.fixture(scope="session")
-def databases_parameters(cloudformation_outputs):
-    parameters = dict(postgresql={}, mysql={}, redshift={}, sqlserver={})
+def databases_parameters(cloudformation_outputs, db_password):
+    parameters = dict(postgresql={}, mysql={}, redshift={}, sqlserver={}, mysql_serverless={})
     parameters["postgresql"]["host"] = cloudformation_outputs["PostgresqlAddress"]
     parameters["postgresql"]["port"] = 3306
     parameters["postgresql"]["schema"] = "public"
@@ -138,18 +138,23 @@ def databases_parameters(cloudformation_outputs):
     parameters["mysql"]["port"] = 3306
     parameters["mysql"]["schema"] = "test"
     parameters["mysql"]["database"] = "test"
+    parameters["redshift"]["secret_arn"] = cloudformation_outputs["RedshiftSecretArn"]
     parameters["redshift"]["host"] = cloudformation_outputs["RedshiftAddress"]
     parameters["redshift"]["port"] = cloudformation_outputs["RedshiftPort"]
     parameters["redshift"]["identifier"] = cloudformation_outputs["RedshiftIdentifier"]
     parameters["redshift"]["schema"] = "public"
     parameters["redshift"]["database"] = "test"
     parameters["redshift"]["role"] = cloudformation_outputs["RedshiftRole"]
-    parameters["password"] = cloudformation_outputs["DatabasesPassword"]
+    parameters["password"] = db_password
     parameters["user"] = "test"
     parameters["sqlserver"]["host"] = cloudformation_outputs["SqlServerAddress"]
     parameters["sqlserver"]["port"] = 1433
     parameters["sqlserver"]["schema"] = "dbo"
     parameters["sqlserver"]["database"] = "test"
+    parameters["mysql_serverless"]["secret_arn"] = cloudformation_outputs["MysqlServerlessSecretArn"]
+    parameters["mysql_serverless"]["schema"] = "test"
+    parameters["mysql_serverless"]["database"] = "test"
+    parameters["mysql_serverless"]["arn"] = cloudformation_outputs["MysqlServerlessClusterArn"]
     return parameters
 
 
@@ -173,6 +178,11 @@ def redshift_external_schema(cloudformation_outputs, databases_parameters, glue_
 @pytest.fixture(scope="session")
 def account_id():
     return boto3.client("sts").get_caller_identity().get("Account")
+
+
+@pytest.fixture(scope="session")
+def db_password():
+    return boto3.client("secretsmanager").get_secret_value(SecretId="aws-data-wrangler/db_password")["SecretString"]
 
 
 @pytest.fixture(scope="function")

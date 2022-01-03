@@ -86,12 +86,25 @@ def connect(
 
     https://github.com/tlocke/pg8000
 
+    Note
+    ----
+    You MUST pass a `connection` OR `secret_id`.
+    Here is an example of the secret structure in Secrets Manager:
+    {
+    "host":"postgresql-instance-wrangler.dr8vkeyrb9m1.us-east-1.rds.amazonaws.com",
+    "username":"test",
+    "password":"test",
+    "engine":"postgresql",
+    "port":"3306",
+    "dbname": "mydb" # Optional
+    }
+
     Parameters
     ----------
     connection : Optional[str]
         Glue Catalog Connection name.
     secret_id: Optional[str]:
-        Specifies the secret containing the version that you want to retrieve.
+        Specifies the secret containing the connection details that you want to retrieve.
         You can specify either the Amazon Resource Name (ARN) or the friendly name of the secret.
     catalog_id : str, optional
         The ID of the Data Catalog.
@@ -132,7 +145,7 @@ def connect(
     attrs: _db_utils.ConnectionAttributes = _db_utils.get_connection_attributes(
         connection=connection, secret_id=secret_id, catalog_id=catalog_id, dbname=dbname, boto3_session=boto3_session
     )
-    if attrs.kind != "postgresql" and attrs.kind != "postgres":
+    if attrs.kind not in ("postgresql", "postgres"):
         raise exceptions.InvalidDatabaseType(
             f"Invalid connection type ({attrs.kind}. It must be a postgresql connection.)"
         )
@@ -277,6 +290,7 @@ def to_sql(
     varchar_lengths: Optional[Dict[str, int]] = None,
     use_column_names: bool = False,
     chunksize: int = 200,
+    upsert_conflict_columns: Optional[List[str]] = None,
 ) -> None:
     """Write records stored in a DataFrame into PostgreSQL.
 
@@ -291,7 +305,11 @@ def to_sql(
     schema : str
         Schema name
     mode : str
-        Append or overwrite.
+        Append, overwrite or upsert.
+            append: Inserts new records into table.
+            overwrite: Drops table and recreates.
+            upsert: Perform an upsert which checks for conflicts on columns given by `upsert_conflict_columns` and
+            sets the new values on conflicts. Note that `upsert_conflict_columns` is required for this mode.
     index : bool
         True to store the DataFrame index as a column in the table,
         otherwise False to ignore it.
@@ -307,6 +325,9 @@ def to_sql(
         inserted into the database columns `col1` and `col3`.
     chunksize: int
         Number of rows which are inserted with each SQL query. Defaults to inserting 200 rows per query.
+    upsert_conflict_columns: List[str], optional
+        This parameter is only supported if `mode` is set top `upsert`. In this case conflicts for the given columns are
+        checked for evaluating the upsert.
 
     Returns
     -------
@@ -329,7 +350,13 @@ def to_sql(
 
     """
     if df.empty is True:
-        raise exceptions.EmptyDataFrame()
+        raise exceptions.EmptyDataFrame("DataFrame cannot be empty.")
+
+    mode = mode.strip().lower()
+    allowed_modes = ["append", "overwrite", "upsert"]
+    _db_utils.validate_mode(mode=mode, allowed_modes=allowed_modes)
+    if mode == "upsert" and not upsert_conflict_columns:
+        raise exceptions.InvalidArgumentValue("<upsert_conflict_columns> needs to be set when using upsert mode.")
     _validate_connection(con=con)
     try:
         with con.cursor() as cursor:
@@ -347,13 +374,18 @@ def to_sql(
                 df.reset_index(level=df.index.names, inplace=True)
             column_placeholders: str = ", ".join(["%s"] * len(df.columns))
             insertion_columns = ""
+            upsert_str = ""
             if use_column_names:
                 insertion_columns = f"({', '.join(df.columns)})"
+            if mode == "upsert":
+                upsert_columns = ", ".join(df.columns.map(lambda column: f"{column}=EXCLUDED.{column}"))
+                conflict_columns = ", ".join(upsert_conflict_columns)  # type: ignore
+                upsert_str = f" ON CONFLICT ({conflict_columns}) DO UPDATE SET {upsert_columns}"
             placeholder_parameter_pair_generator = _db_utils.generate_placeholder_parameter_pairs(
                 df=df, column_placeholders=column_placeholders, chunksize=chunksize
             )
             for placeholders, parameters in placeholder_parameter_pair_generator:
-                sql: str = f'INSERT INTO "{schema}"."{table}" {insertion_columns} VALUES {placeholders}'
+                sql: str = f'INSERT INTO "{schema}"."{table}" {insertion_columns} VALUES {placeholders}{upsert_str}'
                 _logger.debug("sql: %s", sql)
                 cursor.executemany(sql, (parameters,))
             con.commit()

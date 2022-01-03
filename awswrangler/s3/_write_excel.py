@@ -1,7 +1,7 @@
 """Amazon S3 Excel Write Module (PRIVATE)."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import boto3
 import pandas as pd
@@ -17,7 +17,7 @@ def to_excel(
     path: str,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, Any]] = None,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     **pandas_kwargs: Any,
 ) -> str:
     """Write EXCEL file on Amazon S3.
@@ -26,6 +26,11 @@ def to_excel(
     ----
     This function accepts any Pandas's read_excel() argument.
     https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.read_excel.html
+
+    Note
+    ----
+    Depending on the file extension ('xlsx', 'xls', 'odf'...), an additional library
+    might have to be installed first (e.g. xlrd).
 
     Note
     ----
@@ -41,13 +46,12 @@ def to_excel(
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 Session will be used if boto3_session receive None.
     s3_additional_kwargs : Optional[Dict[str, Any]]
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     pandas_kwargs:
         KEYWORD arguments forwarded to pandas.DataFrame.to_excel(). You can NOT pass `pandas_kwargs` explicit, just add
         valid Pandas arguments in the function call and Wrangler will accept it.
@@ -83,7 +87,6 @@ def to_excel(
         s3_additional_kwargs=s3_additional_kwargs,
         boto3_session=session,
     ) as f:
-        pandas_kwargs["engine"] = "openpyxl"
         _logger.debug("pandas_kwargs: %s", pandas_kwargs)
         df.to_excel(f, **pandas_kwargs)
     return path

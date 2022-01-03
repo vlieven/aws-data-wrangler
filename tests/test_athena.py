@@ -112,13 +112,40 @@ def test_athena_ctas(path, path2, path3, glue_table, glue_table2, glue_database,
         ctas_temp_table_name=glue_table2,
         s3_output=path3,
     )
-    assert wr.catalog.does_table_exist(database=glue_ctas_database, table=glue_table2) is True
+    assert wr.catalog.does_table_exist(database=glue_ctas_database, table=glue_table2) is False
     assert len(wr.s3.list_objects(path=path3)) > 2
     assert len(wr.s3.list_objects(path=final_destination)) > 0
     for df in dfs:
         ensure_data_types(df=df, has_list=True)
         ensure_athena_query_metadata(df=df, ctas_approach=True, encrypted=False)
     assert len(wr.s3.list_objects(path=path3)) == 0
+
+
+def test_athena_read_sql_ctas_bucketing(path, path2, glue_table, glue_table2, glue_database, glue_ctas_database):
+    df = pd.DataFrame({"c0": [0, 1], "c1": ["foo", "bar"]})
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+    )
+    df_ctas = wr.athena.read_sql_query(
+        sql=f"SELECT * FROM {glue_table}",
+        ctas_approach=True,
+        database=glue_database,
+        ctas_database_name=glue_ctas_database,
+        ctas_temp_table_name=glue_table2,
+        ctas_bucketing_info=(["c0"], 1),
+        s3_output=path2,
+    )
+    df_no_ctas = wr.athena.read_sql_query(
+        sql=f"SELECT * FROM {glue_table}",
+        ctas_approach=False,
+        database=glue_database,
+        s3_output=path2,
+    )
+    assert df_ctas.equals(df_no_ctas)
 
 
 def test_athena(path, glue_database, glue_table, kms_key, workgroup0, workgroup1):
@@ -220,8 +247,8 @@ def test_athena_read_list(glue_database):
 
 
 def test_sanitize_names():
-    assert wr.catalog.sanitize_column_name("CamelCase") == "camel_case"
-    assert wr.catalog.sanitize_column_name("CamelCase2") == "camel_case2"
+    assert wr.catalog.sanitize_column_name("CamelCase") == "camelcase"
+    assert wr.catalog.sanitize_column_name("CamelCase2") == "camelcase2"
     assert wr.catalog.sanitize_column_name("Camel_Case3") == "camel_case3"
     assert wr.catalog.sanitize_column_name("Cámël_Casë4仮") == "camel_case4_"
     assert wr.catalog.sanitize_column_name("Camel__Case5") == "camel__case5"
@@ -229,8 +256,8 @@ def test_sanitize_names():
     assert wr.catalog.sanitize_column_name("Camel.Case7") == "camel_case7"
     assert wr.catalog.sanitize_column_name("xyz_cd") == "xyz_cd"
     assert wr.catalog.sanitize_column_name("xyz_Cd") == "xyz_cd"
-    assert wr.catalog.sanitize_table_name("CamelCase") == "camel_case"
-    assert wr.catalog.sanitize_table_name("CamelCase2") == "camel_case2"
+    assert wr.catalog.sanitize_table_name("CamelCase") == "camelcase"
+    assert wr.catalog.sanitize_table_name("CamelCase2") == "camelcase2"
     assert wr.catalog.sanitize_table_name("Camel_Case3") == "camel_case3"
     assert wr.catalog.sanitize_table_name("Cámël_Casë4仮") == "camel_case4_"
     assert wr.catalog.sanitize_table_name("Camel__Case5") == "camel__case5"
@@ -252,9 +279,10 @@ def test_athena_ctas_empty(glue_database):
     df1 = wr.athena.read_sql_query(sql=sql, database=glue_database)
     assert df1.empty is True
     ensure_athena_query_metadata(df=df1, ctas_approach=True, encrypted=False)
-    assert len(list(wr.athena.read_sql_query(sql=sql, database=glue_database, chunksize=1))) == 0
+    assert len(list(wr.athena.read_sql_query(sql=sql, database=glue_database, chunksize=1))) == 1
 
 
+@pytest.mark.xfail()
 def test_athena_struct(glue_database):
     sql = "SELECT CAST(ROW(1, 'foo') AS ROW(id BIGINT, value VARCHAR)) AS col0"
     with pytest.raises(wr.exceptions.UnsupportedType):
@@ -403,6 +431,25 @@ def test_athena_nested(path, glue_database, glue_table):
     assert len(df2.columns) == 4
 
 
+def test_athena_get_query_column_types(path, glue_database, glue_table):
+    df = get_df()
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        index=False,
+        use_threads=True,
+        dataset=True,
+        mode="overwrite",
+        database=glue_database,
+        table=glue_table,
+    )
+    query_execution_id = wr.athena.start_query_execution(sql=f"SELECT * FROM {glue_table}", database=glue_database)
+    wr.athena.wait_query(query_execution_id=query_execution_id)
+    column_types = wr.athena.get_query_columns_types(query_execution_id=query_execution_id)
+    assert len(column_types) == len(df.columns)
+    assert set(column_types.keys()) == set(df.columns)
+
+
 def test_athena_undefined_column(glue_database):
     with pytest.raises(wr.exceptions.InvalidArgumentValue):
         wr.athena.read_sql_query("SELECT 1", glue_database)
@@ -450,6 +497,7 @@ def test_read_sql_query_wo_results(path, glue_database, glue_table):
     ensure_athena_query_metadata(df=df, ctas_approach=False, encrypted=False)
 
 
+@pytest.mark.xfail()
 def test_read_sql_query_wo_results_ctas(path, glue_database, glue_table):
     wr.catalog.create_parquet_table(database=glue_database, table=glue_table, path=path, columns_types={"c0": "int"})
     sql = f"ALTER TABLE {glue_database}.{glue_table} SET LOCATION '{path}dir/'"
@@ -931,3 +979,29 @@ def test_bucketing_combined_csv_saving(path, glue_database, glue_table):
 
     assert df2.equals(df3)
     assert scanned_regular >= scanned_bucketed * nb_of_buckets
+
+
+def test_start_query_execution_wait(path, glue_database, glue_table):
+    wr.catalog.delete_table_if_exists(database=glue_database, table=glue_table)
+    wr.s3.to_parquet(
+        df=get_df(),
+        path=path,
+        index=True,
+        use_threads=True,
+        dataset=True,
+        mode="overwrite",
+        database=glue_database,
+        table=glue_table,
+        partition_cols=["par0", "par1"],
+    )
+
+    sql = f"SELECT * FROM {glue_table}"
+    query_id = wr.athena.start_query_execution(sql=sql, database=glue_database, wait=False)
+
+    query_execution_result = wr.athena.start_query_execution(sql=sql, database=glue_database, wait=True)
+
+    assert isinstance(query_id, str)
+    assert isinstance(query_execution_result, dict)
+    assert query_execution_result["Query"] == sql
+    assert query_execution_result["StatementType"] == "DML"
+    assert query_execution_result["QueryExecutionContext"]["Database"] == glue_database

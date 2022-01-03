@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union
 
 import boto3
 import pandas as pd
@@ -18,7 +18,7 @@ from awswrangler._config import apply_configs
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _validate_connection(con: pymysql.connections.Connection) -> None:
+def _validate_connection(con: "pymysql.connections.Connection[Any]") -> None:
     if not isinstance(con, pymysql.connections.Connection):
         raise exceptions.InvalidConnection(
             "Invalid 'conn' argument, please pass a "
@@ -37,7 +37,7 @@ def _drop_table(cursor: Cursor, schema: Optional[str], table: str) -> None:
 def _does_table_exist(cursor: Cursor, schema: Optional[str], table: str) -> bool:
     schema_str = f"TABLE_SCHEMA = '{schema}' AND" if schema else ""
     cursor.execute(f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE " f"{schema_str} TABLE_NAME = '{table}'")
-    return len(cursor.fetchall()) > 0  # type: ignore
+    return len(cursor.fetchall()) > 0
 
 
 def _create_table(
@@ -77,17 +77,36 @@ def connect(
     read_timeout: Optional[int] = None,
     write_timeout: Optional[int] = None,
     connect_timeout: int = 10,
-) -> pymysql.connections.Connection:
-    """Return a pymysql connection from a Glue Catalog Connection.
+    cursorclass: Type[Cursor] = Cursor,
+) -> "pymysql.connections.Connection[Any]":
+    """Return a pymysql connection from a Glue Catalog Connection or Secrets Manager.
 
     https://pymysql.readthedocs.io
+
+    Note
+    ----
+    You MUST pass a `connection` OR `secret_id`.
+    Here is an example of the secret structure in Secrets Manager:
+    {
+    "host":"mysql-instance-wrangler.dr8vkeyrb9m1.us-east-1.rds.amazonaws.com",
+    "username":"test",
+    "password":"test",
+    "engine":"mysql",
+    "port":"3306",
+    "dbname": "mydb" # Optional
+    }
+
+    Note
+    ----
+    It is only possible to configure SSL using Glue Catalog Connection. More at:
+    https://docs.aws.amazon.com/glue/latest/dg/connection-defining.html
 
     Parameters
     ----------
     connection : str
         Glue Catalog Connection name.
     secret_id: Optional[str]:
-        Specifies the secret containing the version that you want to retrieve.
+        Specifies the secret containing the connection details that you want to retrieve.
         You can specify either the Amazon Resource Name (ARN) or the friendly name of the secret.
     catalog_id : str, optional
         The ID of the Data Catalog.
@@ -109,6 +128,9 @@ def connect(
         (default: 10, min: 1, max: 31536000)
         This parameter is forward to pymysql.
         https://pymysql.readthedocs.io/en/latest/modules/connections.html
+    cursorclass : Cursor
+        Cursor class to use, e.g. SSCrusor; defaults to :class:`pymysql.cursors.Cursor`
+        https://pymysql.readthedocs.io/en/latest/modules/cursors.html
 
     Returns
     -------
@@ -136,15 +158,17 @@ def connect(
         password=attrs.password,
         port=attrs.port,
         host=attrs.host,
+        ssl=attrs.ssl_context,  # type: ignore
         read_timeout=read_timeout,
         write_timeout=write_timeout,
         connect_timeout=connect_timeout,
+        cursorclass=cursorclass,
     )
 
 
 def read_sql_query(
     sql: str,
-    con: pymysql.connections.Connection,
+    con: "pymysql.connections.Connection[Any]",
     index_col: Optional[Union[str, List[str]]] = None,
     params: Optional[Union[List[Any], Tuple[Any, ...], Dict[Any, Any]]] = None,
     chunksize: Optional[int] = None,
@@ -200,7 +224,7 @@ def read_sql_query(
 
 def read_sql_table(
     table: str,
-    con: pymysql.connections.Connection,
+    con: "pymysql.connections.Connection[Any]",
     schema: Optional[str] = None,
     index_col: Optional[Union[str, List[str]]] = None,
     params: Optional[Union[List[Any], Tuple[Any, ...], Dict[Any, Any]]] = None,
@@ -262,7 +286,7 @@ def read_sql_table(
 @apply_configs
 def to_sql(
     df: pd.DataFrame,
-    con: pymysql.connections.Connection,
+    con: "pymysql.connections.Connection[Any]",
     table: str,
     schema: str,
     mode: str = "append",
@@ -271,6 +295,7 @@ def to_sql(
     varchar_lengths: Optional[Dict[str, int]] = None,
     use_column_names: bool = False,
     chunksize: int = 200,
+    cursorclass: Type[Cursor] = Cursor,
 ) -> None:
     """Write records stored in a DataFrame into MySQL.
 
@@ -286,8 +311,8 @@ def to_sql(
         Schema name
     mode : str
         Append, overwrite, upsert_duplicate_key, upsert_replace_into, upsert_distinct.
-            append: Inserts new records into table
-            overwrite: Drops table and recreates
+            append: Inserts new records into table.
+            overwrite: Drops table and recreates.
             upsert_duplicate_key: Performs an upsert using `ON DUPLICATE KEY` clause. Requires table schema to have
             defined keys, otherwise duplicate records will be inserted.
             upsert_replace_into: Performs upsert using `REPLACE INTO` clause. Less efficient and still requires the
@@ -311,6 +336,9 @@ def to_sql(
         inserted into the database columns `col1` and `col3`.
     chunksize: int
         Number of rows which are inserted with each SQL query. Defaults to inserting 200 rows per query.
+    cursorclass : Cursor
+        Cursor class to use, e.g. SSCrusor; defaults to :class:`pymysql.cursors.Cursor`
+        https://pymysql.readthedocs.io/en/latest/modules/cursors.html
 
     Returns
     -------
@@ -333,21 +361,20 @@ def to_sql(
 
     """
     if df.empty is True:
-        raise exceptions.EmptyDataFrame()
+        raise exceptions.EmptyDataFrame("DataFrame cannot be empty.")
+
     mode = mode.strip().lower()
-    modes = [
+    allowed_modes = [
         "append",
         "overwrite",
         "upsert_replace_into",
         "upsert_duplicate_key",
         "upsert_distinct",
     ]
-    if mode not in modes:
-        raise exceptions.InvalidArgumentValue(f"mode must be one of {', '.join(modes)}")
-
+    _db_utils.validate_mode(mode=mode, allowed_modes=allowed_modes)
     _validate_connection(con=con)
     try:
-        with con.cursor() as cursor:
+        with con.cursor(cursor=cursorclass) as cursor:
             _create_table(
                 df=df,
                 cursor=cursor,
@@ -365,7 +392,7 @@ def to_sql(
             upsert_columns = ""
             upsert_str = ""
             if use_column_names:
-                insertion_columns = f"({', '.join(df.columns)})"
+                insertion_columns = f"(`{'`, `'.join(df.columns)}`)"
             if mode == "upsert_duplicate_key":
                 upsert_columns = ", ".join(df.columns.map(lambda column: f"`{column}`=VALUES(`{column}`)"))
                 upsert_str = f" ON DUPLICATE KEY UPDATE {upsert_columns}"

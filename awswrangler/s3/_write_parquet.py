@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.lib
 import pyarrow.parquet
 
-from awswrangler import _data_types, _utils, catalog, exceptions
+from awswrangler import _data_types, _utils, catalog, exceptions, lakeformation
 from awswrangler._config import apply_configs
 from awswrangler.s3._delete import delete_objects
 from awswrangler.s3._fs import open_s3_object
@@ -22,23 +22,6 @@ from awswrangler.s3._write_concurrent import _WriteProxy
 from awswrangler.s3._write_dataset import _to_dataset
 
 _logger: logging.Logger = logging.getLogger(__name__)
-
-
-def _check_schema_changes(columns_types: Dict[str, str], table_input: Optional[Dict[str, Any]], mode: str) -> None:
-    if (table_input is not None) and (mode in ("append", "overwrite_partitions")):
-        catalog_cols: Dict[str, str] = {x["Name"]: x["Type"] for x in table_input["StorageDescriptor"]["Columns"]}
-        for c, t in columns_types.items():
-            if c not in catalog_cols:
-                raise exceptions.InvalidArgumentValue(
-                    f"Schema change detected: New column {c} with type {t}. "
-                    "Please pass schema_evolution=True to allow new columns "
-                    "behaviour."
-                )
-            if t != catalog_cols[c]:  # Data type change detected!
-                raise exceptions.InvalidArgumentValue(
-                    f"Schema change detected: Data type change on column {c} "
-                    f"(Old type: {catalog_cols[c]} / New type {t})."
-                )
 
 
 def _get_file_path(file_counter: int, file_path: str) -> str:
@@ -56,12 +39,20 @@ def _get_file_path(file_counter: int, file_path: str) -> str:
 def _new_writer(
     file_path: str,
     compression: Optional[str],
+    pyarrow_additional_kwargs: Optional[Dict[str, str]],
     schema: pa.Schema,
     boto3_session: boto3.Session,
     s3_additional_kwargs: Optional[Dict[str, str]],
-    use_threads: bool,
+    use_threads: Union[bool, int],
 ) -> Iterator[pyarrow.parquet.ParquetWriter]:
     writer: Optional[pyarrow.parquet.ParquetWriter] = None
+    if not pyarrow_additional_kwargs:
+        pyarrow_additional_kwargs = {}
+    if not pyarrow_additional_kwargs.get("coerce_timestamps"):
+        pyarrow_additional_kwargs["coerce_timestamps"] = "ms"
+    if "flavor" not in pyarrow_additional_kwargs:
+        pyarrow_additional_kwargs["flavor"] = "spark"
+
     with open_s3_object(
         path=file_path,
         mode="wb",
@@ -74,10 +65,9 @@ def _new_writer(
                 where=f,
                 write_statistics=True,
                 use_dictionary=True,
-                coerce_timestamps="ms",
                 compression="NONE" if compression is None else compression,
-                flavor="spark",
                 schema=schema,
+                **pyarrow_additional_kwargs,
             )
             yield writer
         finally:
@@ -90,14 +80,16 @@ def _write_chunk(
     boto3_session: Optional[boto3.Session],
     s3_additional_kwargs: Optional[Dict[str, str]],
     compression: Optional[str],
+    pyarrow_additional_kwargs: Optional[Dict[str, str]],
     table: pa.Table,
     offset: int,
     chunk_size: int,
-    use_threads: bool,
+    use_threads: Union[bool, int],
 ) -> List[str]:
     with _new_writer(
         file_path=file_path,
         compression=compression,
+        pyarrow_additional_kwargs=pyarrow_additional_kwargs,
         schema=table.schema,
         boto3_session=boto3_session,
         s3_additional_kwargs=s3_additional_kwargs,
@@ -112,13 +104,14 @@ def _to_parquet_chunked(
     boto3_session: Optional[boto3.Session],
     s3_additional_kwargs: Optional[Dict[str, str]],
     compression: Optional[str],
+    pyarrow_additional_kwargs: Optional[Dict[str, Any]],
     table: pa.Table,
     max_rows_by_file: int,
     num_of_rows: int,
     cpus: int,
 ) -> List[str]:
     chunks: int = math.ceil(num_of_rows / max_rows_by_file)
-    use_threads: bool = cpus > 1
+    use_threads: Union[bool, int] = cpus > 1
     proxy: _WriteProxy = _WriteProxy(use_threads=use_threads)
     for chunk in range(chunks):
         offset: int = chunk * max_rows_by_file
@@ -129,6 +122,7 @@ def _to_parquet_chunked(
             boto3_session=boto3_session,
             s3_additional_kwargs=s3_additional_kwargs,
             compression=compression,
+            pyarrow_additional_kwargs=pyarrow_additional_kwargs,
             table=table,
             offset=offset,
             chunk_size=max_rows_by_file,
@@ -143,11 +137,12 @@ def _to_parquet(
     index: bool,
     compression: Optional[str],
     compression_ext: str,
+    pyarrow_additional_kwargs: Optional[Dict[str, Any]],
     cpus: int,
     dtype: Dict[str, str],
     boto3_session: Optional[boto3.Session],
     s3_additional_kwargs: Optional[Dict[str, str]],
-    use_threads: bool,
+    use_threads: Union[bool, int],
     path: Optional[str] = None,
     path_root: Optional[str] = None,
     filename_prefix: Optional[str] = uuid.uuid4().hex,
@@ -174,6 +169,7 @@ def _to_parquet(
             boto3_session=boto3_session,
             s3_additional_kwargs=s3_additional_kwargs,
             compression=compression,
+            pyarrow_additional_kwargs=pyarrow_additional_kwargs,
             table=table,
             max_rows_by_file=max_rows_by_file,
             num_of_rows=df.shape[0],
@@ -183,6 +179,7 @@ def _to_parquet(
         with _new_writer(
             file_path=file_path,
             compression=compression,
+            pyarrow_additional_kwargs=pyarrow_additional_kwargs,
             schema=table.schema,
             boto3_session=boto3_session,
             s3_additional_kwargs=s3_additional_kwargs,
@@ -194,13 +191,14 @@ def _to_parquet(
 
 
 @apply_configs
-def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
+def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
     df: pd.DataFrame,
     path: Optional[str] = None,
     index: bool = False,
     compression: Optional[str] = "snappy",
+    pyarrow_additional_kwargs: Optional[Dict[str, Any]] = None,
     max_rows_by_file: Optional[int] = None,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, Any]] = None,
     sanitize_columns: bool = False,
@@ -214,6 +212,8 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
     schema_evolution: bool = True,
     database: Optional[str] = None,
     table: Optional[str] = None,
+    table_type: Optional[str] = None,
+    transaction_id: Optional[str] = None,
     dtype: Optional[Dict[str, str]] = None,
     description: Optional[str] = None,
     parameters: Optional[Dict[str, str]] = None,
@@ -231,6 +231,11 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
 
     The concept of Dataset goes beyond the simple idea of ordinary files and enable more
     complex features like partitioning and catalog integration (Amazon Athena/AWS Glue Catalog).
+
+    Note
+    ----
+    This operation may mutate the original pandas dataframe in-place. To avoid this behaviour
+    please pass in a deep copy instead (i.e. `df.copy()`)
 
     Note
     ----
@@ -258,19 +263,22 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
         True to store the DataFrame index in file, otherwise False to ignore it.
     compression: str, optional
         Compression style (``None``, ``snappy``, ``gzip``).
+    pyarrow_additional_kwargs : Optional[Dict[str, Any]]
+        Additional parameters forwarded to pyarrow.
+        e.g. pyarrow_additional_kwargs={'coerce_timestamps': 'ns', 'use_deprecated_int96_timestamps': False,
+        'allow_truncated_timestamps'=False}
     max_rows_by_file : int
         Max number of rows in each file.
         Default is None i.e. dont split the files.
         (e.g. 33554432, 268435456)
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs : Optional[Dict[str, Any]]
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
     sanitize_columns : bool
         True to sanitize columns names (using `wr.catalog.sanitize_table_name` and `wr.catalog.sanitize_column_name`)
@@ -293,22 +301,26 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
     concurrent_partitioning: bool
         If True will increase the parallelism level during the partitions writing. It will decrease the
         writing time and increase the memory usage.
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/tutorials/022%20-%20Writing%20Partitions%20Concurrently.html
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/022%20-%20Writing%20Partitions%20Concurrently.html
     mode: str, optional
         ``append`` (Default), ``overwrite``, ``overwrite_partitions``. Only takes effect if dataset=True.
         For details check the related tutorial:
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/stubs/awswrangler.s3.to_parquet.html#awswrangler.s3.to_parquet
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/004%20-%20Parquet%20Datasets.html
     catalog_versioning : bool
         If True and `mode="overwrite"`, creates an archived version of the table catalog before updating it.
     schema_evolution : bool
-        If True allows schema evolution (new or missing columns), otherwise a exception will be raised.
+        If True allows schema evolution (new or missing columns), otherwise a exception will be raised. True by default.
         (Only considered if dataset=True and mode in ("append", "overwrite_partitions"))
         Related tutorial:
-        https://aws-data-wrangler.readthedocs.io/en/2.6.0/tutorials/014%20-%20Schema%20Evolution.html
+        https://aws-data-wrangler.readthedocs.io/en/2.13.0/tutorials/014%20-%20Schema%20Evolution.html
     database : str, optional
         Glue/Athena catalog: Database name.
     table : str, optional
         Glue/Athena catalog: Table name.
+    table_type: str, optional
+        The type of the Glue Table. Set to EXTERNAL_TABLE if None.
+    transaction_id: str, optional
+        The ID of the transaction when writing to a Governed Table.
     dtype : Dict[str, str], optional
         Dictionary of columns names and Athena/Glue types to be casted.
         Useful when you have columns with undetermined or mixed data types.
@@ -454,6 +466,28 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
         }
     }
 
+    Writing dataset to Glue governed table
+
+    >>> import awswrangler as wr
+    >>> import pandas as pd
+    >>> wr.s3.to_parquet(
+    ...     df=pd.DataFrame({
+    ...         'col': [1, 2, 3],
+    ...         'col2': ['A', 'A', 'B'],
+    ...         'col3': [None, None, None]
+    ...     }),
+    ...     dataset=True,
+    ...     mode='append',
+    ...     database='default',  # Athena/Glue database
+    ...     table='my_table',  # Athena/Glue table
+    ...     table_type='GOVERNED',
+    ...     transaction_id="xxx",
+    ... )
+    {
+        'paths': ['s3://.../x.parquet'],
+        'partitions_values: {}
+    }
+
     Writing dataset casting empty column data type
 
     >>> import awswrangler as wr
@@ -500,6 +534,9 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
     dtype = dtype if dtype else {}
     partitions_values: Dict[str, List[str]] = {}
     mode = "append" if mode is None else mode
+    commit_trans: bool = False
+    if transaction_id:
+        table_type = "GOVERNED"
     filename_prefix = filename_prefix + uuid.uuid4().hex if filename_prefix else uuid.uuid4().hex
     cpus: int = _utils.ensure_cpu_count(use_threads=use_threads)
     session: boto3.Session = _utils.ensure_session(session=boto3_session)
@@ -512,9 +549,12 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
     catalog_table_input: Optional[Dict[str, Any]] = None
     if database is not None and table is not None:
         catalog_table_input = catalog._get_table_input(  # pylint: disable=protected-access
-            database=database, table=table, boto3_session=session, catalog_id=catalog_id
+            database=database, table=table, boto3_session=session, transaction_id=transaction_id, catalog_id=catalog_id
         )
-        catalog_path = catalog_table_input["StorageDescriptor"]["Location"] if catalog_table_input else None
+        catalog_path: Optional[str] = None
+        if catalog_table_input:
+            table_type = catalog_table_input["TableType"]
+            catalog_path = catalog_table_input["StorageDescriptor"]["Location"]
         if path is None:
             if catalog_path:
                 path = catalog_path
@@ -527,6 +567,10 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                 raise exceptions.InvalidArgumentValue(
                     f"The specified path: {path}, does not match the existing Glue catalog table path: {catalog_path}"
                 )
+        if (table_type == "GOVERNED") and (not transaction_id):
+            _logger.debug("`transaction_id` not specified for GOVERNED table, starting transaction")
+            transaction_id = lakeformation.start_transaction(read_only=False, boto3_session=boto3_session)
+            commit_trans = True
     df = _apply_dtype(df=df, dtype=dtype, catalog_table_input=catalog_table_input, mode=mode)
     schema: pa.Schema = _data_types.pyarrow_schema_from_pandas(
         df=df, index=index, ignore_cols=partition_cols, dtype=dtype
@@ -542,6 +586,7 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
             cpus=cpus,
             compression=compression,
             compression_ext=compression_ext,
+            pyarrow_additional_kwargs=pyarrow_additional_kwargs,
             boto3_session=session,
             s3_additional_kwargs=s3_additional_kwargs,
             dtype=dtype,
@@ -556,7 +601,43 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                 df=df, index=index, partition_cols=partition_cols, dtype=dtype
             )
             if schema_evolution is False:
-                _check_schema_changes(columns_types=columns_types, table_input=catalog_table_input, mode=mode)
+                _utils.check_schema_changes(columns_types=columns_types, table_input=catalog_table_input, mode=mode)
+
+            if (catalog_table_input is None) and (table_type == "GOVERNED"):
+                catalog._create_parquet_table(  # pylint: disable=protected-access
+                    database=database,
+                    table=table,
+                    path=path,  # type: ignore
+                    columns_types=columns_types,
+                    table_type=table_type,
+                    partitions_types=partitions_types,
+                    bucketing_info=bucketing_info,
+                    compression=compression,
+                    description=description,
+                    parameters=parameters,
+                    columns_comments=columns_comments,
+                    boto3_session=session,
+                    mode=mode,
+                    transaction_id=transaction_id,
+                    catalog_versioning=catalog_versioning,
+                    projection_enabled=projection_enabled,
+                    projection_types=projection_types,
+                    projection_ranges=projection_ranges,
+                    projection_values=projection_values,
+                    projection_intervals=projection_intervals,
+                    projection_digits=projection_digits,
+                    projection_storage_location_template=None,
+                    catalog_id=catalog_id,
+                    catalog_table_input=catalog_table_input,
+                )
+                catalog_table_input = catalog._get_table_input(  # pylint: disable=protected-access
+                    database=database,
+                    table=table,
+                    boto3_session=session,
+                    transaction_id=transaction_id,
+                    catalog_id=catalog_id,
+                )
+
         paths, partitions_values = _to_dataset(
             func=_to_parquet,
             concurrent_partitioning=concurrent_partitioning,
@@ -566,9 +647,16 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
             index=index,
             compression=compression,
             compression_ext=compression_ext,
+            catalog_id=catalog_id,
+            database=database,
+            table=table,
+            table_type=table_type,
+            transaction_id=transaction_id,
+            pyarrow_additional_kwargs=pyarrow_additional_kwargs,
             cpus=cpus,
             use_threads=use_threads,
             partition_cols=partition_cols,
+            partitions_types=partitions_types,
             bucketing_info=bucketing_info,
             dtype=dtype,
             mode=mode,
@@ -584,6 +672,7 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                     table=table,
                     path=path,  # type: ignore
                     columns_types=columns_types,
+                    table_type=table_type,
                     partitions_types=partitions_types,
                     bucketing_info=bucketing_info,
                     compression=compression,
@@ -592,6 +681,7 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                     columns_comments=columns_comments,
                     boto3_session=session,
                     mode=mode,
+                    transaction_id=transaction_id,
                     catalog_versioning=catalog_versioning,
                     projection_enabled=projection_enabled,
                     projection_types=projection_types,
@@ -599,10 +689,11 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                     projection_values=projection_values,
                     projection_intervals=projection_intervals,
                     projection_digits=projection_digits,
+                    projection_storage_location_template=None,
                     catalog_id=catalog_id,
                     catalog_table_input=catalog_table_input,
                 )
-                if partitions_values and (regular_partitions is True):
+                if partitions_values and (regular_partitions is True) and (table_type != "GOVERNED"):
                     _logger.debug("partitions_values:\n%s", partitions_values)
                     catalog.add_parquet_partitions(
                         database=database,
@@ -613,6 +704,10 @@ def to_parquet(  # pylint: disable=too-many-arguments,too-many-locals
                         boto3_session=session,
                         catalog_id=catalog_id,
                         columns_types=columns_types,
+                    )
+                if commit_trans:
+                    lakeformation.commit_transaction(
+                        transaction_id=transaction_id, boto3_session=boto3_session  # type: ignore
                     )
             except Exception:
                 _logger.debug("Catalog write failed, cleaning up S3 (paths: %s).", paths)
@@ -638,7 +733,7 @@ def store_parquet_metadata(  # pylint: disable=too-many-arguments
     dtype: Optional[Dict[str, str]] = None,
     sampling: float = 1.0,
     dataset: bool = False,
-    use_threads: bool = True,
+    use_threads: Union[bool, int] = True,
     description: Optional[str] = None,
     parameters: Optional[Dict[str, str]] = None,
     columns_comments: Optional[Dict[str, str]] = None,
@@ -659,7 +754,7 @@ def store_parquet_metadata(  # pylint: disable=too-many-arguments
 
     Infer Apache Parquet file(s) metadata from from a received S3 prefix or list of S3 objects paths
     And then stores it on AWS Glue Catalog including all inferred partitions
-    (No need of 'MCSK REPAIR TABLE')
+    (No need of 'MSCK REPAIR TABLE')
 
     The concept of Dataset goes beyond the simple idea of files and enable more
     complex features like partitioning and catalog integration (AWS Glue Catalog).
@@ -710,9 +805,10 @@ def store_parquet_metadata(  # pylint: disable=too-many-arguments
         The lower, the faster.
     dataset: bool
         If True read a parquet dataset instead of simple file(s) loading all the related partitions as columns.
-    use_threads : bool
+    use_threads : bool, int
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If integer is provided, specified number is used.
     description: str, optional
         Glue/Athena catalog: Table description
     parameters: Dict[str, str], optional
@@ -755,9 +851,7 @@ def store_parquet_metadata(  # pylint: disable=too-many-arguments
         https://docs.aws.amazon.com/athena/latest/ug/partition-projection-supported-types.html
         (e.g. {'col_name': '1', 'col2_name': '2'})
     s3_additional_kwargs : Optional[Dict[str, Any]]
-        Forward to botocore requests. Valid parameters: "ACL", "Metadata", "ServerSideEncryption", "StorageClass",
-        "SSECustomerAlgorithm", "SSECustomerKey", "SSEKMSKeyId", "SSEKMSEncryptionContext", "Tagging",
-        "RequestPayer", "ExpectedBucketOwner".
+        Forwarded to botocore requests.
         e.g. s3_additional_kwargs={'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'YOUR_KMS_KEY_ARN'}
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.

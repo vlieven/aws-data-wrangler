@@ -5,7 +5,8 @@ Install
 and on several platforms (AWS Lambda, AWS Glue Python Shell, EMR, EC2,
 on-premises, Amazon SageMaker, local, etc).
 
-Some good practices for most of the methods bellow are:
+Some good practices for most of the methods below are:
+
   - Use new and individual Virtual Environments for each project (`venv <https://docs.python.org/3/library/venv.html>`_).
   - On Notebooks, always restart your kernel after installations.
 
@@ -24,8 +25,47 @@ Conda
 AWS Lambda Layer
 ----------------
 
+Managed Layer
+^^^^^^^^^^^^^^
+
+AWS Data Wrangler is available as a Lambda Managed layer in the following regions:
+
+- ap-northeast-1
+- ap-southeast-2
+- eu-central-1
+- eu-west-1
+- us-east-1
+- us-east-2
+- us-west-2
+
+It can be accessed in the AWS Lambda console directly:
+
+.. image:: _static/aws_lambda_managed_layer.png
+  :width: 400
+  :alt: AWS Managed Lambda Layer
+
+Or via its arn: ``arn:aws:lambda:<region>:336392948345:layer:AWSDataWrangler-Python<version>:<layer-version>``.
+For example: ``arn:aws:lambda:us-east-1:336392948345:layer:AWSDataWrangler-Python37:1``.
+Both Python 3.7 and 3.8 are supported.
+
+Here is a mapping of layer version to library version:
+
+.. list-table:: Lambda layer to Python library versions mapping
+   :widths: 25 25
+   :header-rows: 1
+
+   * - Lambda Layer Version
+     - Python Library Version
+   * - 1
+     - 2.12.0
+
+Custom Layer
+^^^^^^^^^^^^^^
+
+For AWS regions not in the above list, you can create your own Lambda layer following these instructions:
+
 1 - Go to `GitHub's release section <https://github.com/awslabs/aws-data-wrangler/releases>`_
-and download the layer zip related to the desired version.
+and download the layer zip related to the desired version. Alternatively, you can download the zip from the `public artifacts bucket <https://aws-data-wrangler.readthedocs.io/en/latest/install.html#public-artifacts>`_.
 
 2 - Go to the AWS Lambda Panel, open the layer section (left side)
 and click **create layer**.
@@ -35,11 +75,30 @@ and press **create** to create the layer.
 
 4 - Go to your Lambda and select your new layer!
 
+Serverless Application Repository (SAR)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+AWS Data Wrangler layers are also available in the `AWS Serverless Application Repository <https://serverlessrepo.aws.amazon.com/applications>`_ (SAR).
+
+Here is an example of how to create the Lambda layer in your CDK app:
+
+.. code-block:: python
+
+    CfnApplication(
+        self,
+        "wrangler-layer",
+        location=CfnApplication.ApplicationLocationProperty(
+            application_id="arn:aws:serverlessrepo:us-east-1:336392948345:applications/aws-data-wrangler-layer-py3-8",
+            semantic_version="2.12.0",
+        ),
+    )
+
+
 AWS Glue Python Shell Jobs
 --------------------------
 
 1 - Go to `GitHub's release page <https://github.com/awslabs/aws-data-wrangler/releases>`_ and download the wheel file
-(.whl) related to the desired version.
+(.whl) related to the desired version. Alternatively, you can download the wheel from the `public artifacts bucket <https://aws-data-wrangler.readthedocs.io/en/latest/install.html#public-artifacts>`_.
 
 2 - Upload the wheel file to any Amazon S3 location.
 
@@ -61,11 +120,26 @@ Go to your Glue PySpark job and create a new *Job parameters* key/value:
 
 To install a specific version, set the value for above Job parameter as follows:
 
-* Value: ``pyarrow==2,awswrangler==2.6.0``
+* Value: ``cython==0.29.21,pg8000==1.21.0,pyarrow==2,pandas==1.3.0,awswrangler==2.13.0``
 
 .. note:: Pyarrow 3 is not currently supported in Glue PySpark Jobs, which is why a previous installation of pyarrow 2 is required.
 
 `Official Glue PySpark Reference <https://docs.aws.amazon.com/glue/latest/dg/reduced-start-times-spark-etl-jobs.html#reduced-start-times-new-features>`_
+
+Public Artifacts
+-----------------
+
+Lambda zipped layers and Python wheels are stored in a publicly accessible S3 bucket for all versions.
+
+* Bucket: ``aws-data-wrangler-public-artifacts``
+
+* Prefix: ``releases/<version>/``
+
+  * Lambda layer: ``awswrangler-layer-<version>-py<py-version>.zip``
+
+  * Python wheel: ``awswrangler-<version>-py3-none-any.whl``
+
+For example: ``s3://aws-data-wrangler-public-artifacts/releases/2.13.0/awswrangler-layer-2.13.0-py3.8.zip``
 
 Amazon SageMaker Notebook
 -------------------------
@@ -157,7 +231,7 @@ complement Big Data pipelines.
         sudo pip install pyarrow==2 awswrangler
 
 .. note:: Make sure to freeze the Wrangler version in the bootstrap for productive
-          environments (e.g. awswrangler==2.6.0)
+          environments (e.g. awswrangler==2.13.0)
 
 .. note:: Pyarrow 3 is not currently supported in the default EMR image, which is why a previous installation of pyarrow 2 is required.
 

@@ -1,6 +1,7 @@
 """Databases Utilities."""
 
 import logging
+import ssl
 from typing import Any, Dict, Generator, Iterator, List, NamedTuple, Optional, Tuple, Union, cast
 
 import boto3
@@ -22,6 +23,7 @@ class ConnectionAttributes(NamedTuple):
     host: str
     port: int
     database: str
+    ssl_context: Optional[ssl.SSLContext]
 
 
 def _get_dbname(cluster_id: str, boto3_session: Optional[boto3.Session] = None) -> str:
@@ -41,6 +43,20 @@ def _get_connection_attributes_from_catalog(
     else:
         database_sep = "/"
     port, database = details["JDBC_CONNECTION_URL"].split(":")[3].split(database_sep)
+    ssl_context: Optional[ssl.SSLContext] = None
+    if details.get("JDBC_ENFORCE_SSL") == "true":
+        ssl_cert_path: Optional[str] = details.get("CUSTOM_JDBC_CERT")
+        ssl_cadata: Optional[str] = None
+        if ssl_cert_path:
+            bucket_name, key_path = _utils.parse_path(ssl_cert_path)
+            client_s3: boto3.client = _utils.client(service_name="s3", session=boto3_session)
+            try:
+                ssl_cadata = client_s3.get_object(Bucket=bucket_name, Key=key_path)["Body"].read().decode("utf-8")
+            except client_s3.exception.NoSuchKey:
+                raise exceptions.NoFilesFound(  # pylint: disable=raise-missing-from
+                    f"No CA certificate found at {ssl_cert_path}."
+                )
+        ssl_context = ssl.create_default_context(cadata=ssl_cadata)
     return ConnectionAttributes(
         kind=details["JDBC_CONNECTION_URL"].split(":")[1].lower(),
         user=details["USERNAME"],
@@ -48,6 +64,7 @@ def _get_connection_attributes_from_catalog(
         host=details["JDBC_CONNECTION_URL"].split(":")[2].replace("/", ""),
         port=int(port),
         database=dbname if dbname is not None else database,
+        ssl_context=ssl_context,
     )
 
 
@@ -71,6 +88,7 @@ def _get_connection_attributes_from_secrets_manager(
         host=secret_value["host"],
         port=secret_value["port"],
         database=_dbname,
+        ssl_context=None,
     )
 
 
@@ -125,16 +143,19 @@ def _records2df(
                 array = pa.array(obj=col_values, safe=safe)  # Creating Arrow array
                 array = array.cast(target_type=dtype[col_name], safe=safe)  # Casting
         arrays.append(array)
-    table = pa.Table.from_arrays(arrays=arrays, names=cols_names)  # Creating arrow Table
-    df: pd.DataFrame = table.to_pandas(  # Creating Pandas DataFrame
-        use_threads=True,
-        split_blocks=True,
-        self_destruct=True,
-        integer_object_nulls=False,
-        date_as_object=True,
-        types_mapper=_data_types.pyarrow2pandas_extension,
-        safe=safe,
-    )
+    if not arrays:
+        df = pd.DataFrame(columns=cols_names)
+    else:
+        table = pa.Table.from_arrays(arrays=arrays, names=cols_names)  # Creating arrow Table
+        df = table.to_pandas(  # Creating Pandas DataFrame
+            use_threads=True,
+            split_blocks=True,
+            self_destruct=True,
+            integer_object_nulls=False,
+            date_as_object=True,
+            types_mapper=_data_types.pyarrow2pandas_extension,
+            safe=safe,
+        )
     if index is not None:
         df.set_index(index, inplace=True)
     return df
@@ -238,3 +259,9 @@ def generate_placeholder_parameter_pairs(
         chunk_placeholders = ", ".join([f"({column_placeholders})" for _ in range(len(parameters_chunk))])
         flattened_chunk = [convert_value_to_native_python_type(value) for row in parameters_chunk for value in row]
         yield chunk_placeholders, flattened_chunk
+
+
+def validate_mode(mode: str, allowed_modes: List[str]) -> None:
+    """Check if mode is included in allowed_modes."""
+    if mode not in allowed_modes:
+        raise exceptions.InvalidArgumentValue(f"mode must be one of {', '.join(allowed_modes)}")

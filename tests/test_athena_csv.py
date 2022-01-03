@@ -1,3 +1,4 @@
+import csv
 import logging
 from sys import version_info
 
@@ -337,7 +338,8 @@ def test_athena_csv_types(path, glue_database, glue_table):
 
 @pytest.mark.parametrize("use_threads", [True, False])
 @pytest.mark.parametrize("ctas_approach", [True, False])
-def test_skip_header(path, glue_database, glue_table, use_threads, ctas_approach):
+@pytest.mark.parametrize("line_count", [1, 2])
+def test_skip_header(path, glue_database, glue_table, use_threads, ctas_approach, line_count):
     df = pd.DataFrame({"c0": [1, 2], "c1": [3.3, 4.4], "c2": ["foo", "boo"]})
     df["c0"] = df["c0"].astype("Int64")
     df["c2"] = df["c2"].astype("string")
@@ -347,10 +349,10 @@ def test_skip_header(path, glue_database, glue_table, use_threads, ctas_approach
         table=glue_table,
         path=path,
         columns_types={"c0": "bigint", "c1": "double", "c2": "string"},
-        skip_header_line_count=1,
+        skip_header_line_count=line_count,
     )
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads, ctas_approach=ctas_approach)
-    assert df.equals(df2)
+    assert df.iloc[line_count - 1 :].reset_index(drop=True).equals(df2)
 
 
 @pytest.mark.parametrize("use_threads", [True, False])
@@ -444,3 +446,41 @@ def test_csv_compressed(path, glue_table, glue_database, use_threads, concurrent
         assert df2["id"].sum() == 6
         ensure_data_types_csv(df2)
         assert wr.catalog.delete_table_if_exists(database=glue_database, table=glue_table) is True
+
+
+@pytest.mark.parametrize("use_threads", [True, False])
+@pytest.mark.parametrize("ctas_approach", [True, False])
+def test_opencsv_serde(path, glue_table, glue_database, use_threads, ctas_approach):
+    df = pd.DataFrame({"col": ["1", "2", "3"], "col2": ["A", "A", "B"]})
+    response = wr.s3.to_csv(
+        df=df,
+        path=path,
+        dataset=True,
+        partition_cols=["col2"],
+        sep=",",
+        index=False,
+        header=False,
+        use_threads=use_threads,
+        quoting=csv.QUOTE_NONE,
+    )
+    wr.catalog.create_csv_table(
+        database=glue_database,
+        table=glue_table,
+        path=path,
+        columns_types={"col": "string"},
+        partitions_types={"col2": "string"},
+        serde_library="org.apache.hadoop.hive.serde2.OpenCSVSerde",
+        serde_parameters={"separatorChar": ",", "quoteChar": '"', "escapeChar": "\\"},
+    )
+    wr.catalog.add_csv_partitions(
+        database=glue_database,
+        table=glue_table,
+        partitions_values=response["partitions_values"],
+        serde_library="org.apache.hadoop.hive.serde2.OpenCSVSerde",
+        serde_parameters={"separatorChar": ",", "quoteChar": '"', "escapeChar": "\\"},
+    )
+    df2 = wr.athena.read_sql_table(
+        table=glue_table, database=glue_database, use_threads=use_threads, ctas_approach=ctas_approach
+    )
+    df = df.applymap(lambda x: x.replace('"', "")).convert_dtypes()
+    assert df.equals(df2.sort_values(by=list(df2)).reset_index(drop=True))

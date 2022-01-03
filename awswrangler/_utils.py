@@ -93,6 +93,12 @@ def _get_endpoint_url(service_name: str) -> Optional[str]:
         endpoint_url = _config.config.kms_endpoint_url
     elif service_name == "emr" and _config.config.emr_endpoint_url is not None:
         endpoint_url = _config.config.emr_endpoint_url
+    elif service_name == "lakeformation" and _config.config.lakeformation_endpoint_url is not None:
+        endpoint_url = _config.config.lakeformation_endpoint_url
+    elif service_name == "dynamodb" and _config.config.dynamodb_endpoint_url is not None:
+        endpoint_url = _config.config.dynamodb_endpoint_url
+    elif service_name == "secretsmanager" and _config.config.secretsmanager_endpoint_url is not None:
+        endpoint_url = _config.config.secretsmanager_endpoint_url
     return endpoint_url
 
 
@@ -159,7 +165,7 @@ def parse_path(path: str) -> Tuple[str, str]:
     return bucket, key
 
 
-def ensure_cpu_count(use_threads: bool = True) -> int:
+def ensure_cpu_count(use_threads: Union[bool, int] = True) -> int:
     """Get the number of cpu cores to be used.
 
     Note
@@ -168,8 +174,9 @@ def ensure_cpu_count(use_threads: bool = True) -> int:
 
     Parameters
     ----------
-    use_threads : bool
+    use_threads : Union[bool, int]
             True to enable multi-core utilization, False to disable.
+            If given an int will simply return the input value.
 
     Returns
     -------
@@ -185,6 +192,10 @@ def ensure_cpu_count(use_threads: bool = True) -> int:
     1
 
     """
+    if type(use_threads) == int:  # pylint: disable=unidiomatic-typecheck
+        if use_threads < 1:
+            return 1
+        return use_threads
     cpus: int = 1
     if use_threads is True:
         cpu_cnt: Optional[int] = os.cpu_count()
@@ -366,3 +377,21 @@ def block_waiting_available_thread(seq: Sequence[Future], max_workers: int) -> N
     while len(running) >= max_workers:
         wait_any_future_available(seq=running)
         running = get_running_futures(seq=running)
+
+
+def check_schema_changes(columns_types: Dict[str, str], table_input: Optional[Dict[str, Any]], mode: str) -> None:
+    """Check schema changes."""
+    if (table_input is not None) and (mode in ("append", "overwrite_partitions")):
+        catalog_cols: Dict[str, str] = {x["Name"]: x["Type"] for x in table_input["StorageDescriptor"]["Columns"]}
+        for c, t in columns_types.items():
+            if c not in catalog_cols:
+                raise exceptions.InvalidArgumentValue(
+                    f"Schema change detected: New column {c} with type {t}. "
+                    "Please pass schema_evolution=True to allow new columns "
+                    "behaviour."
+                )
+            if t != catalog_cols[c]:  # Data type change detected!
+                raise exceptions.InvalidArgumentValue(
+                    f"Schema change detected: Data type change on column {c} "
+                    f"(Old type: {catalog_cols[c]} / New type {t})."
+                )

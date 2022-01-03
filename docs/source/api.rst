@@ -4,10 +4,14 @@ API Reference
 * `Amazon S3`_
 * `AWS Glue Catalog`_
 * `Amazon Athena`_
+* `AWS Lake Formation`_
 * `Amazon Redshift`_
 * `PostgreSQL`_
 * `MySQL`_
 * `Microsoft SQL Server`_
+* `Data API Redshift`_
+* `Data API RDS`_
+* `OpenSearch`_
 * `DynamoDB`_
 * `Amazon Timestream`_
 * `Amazon EMR`_
@@ -31,6 +35,7 @@ Amazon S3
     does_object_exist
     download
     get_bucket_region
+    list_buckets
     list_directories
     list_objects
     merge_datasets
@@ -42,6 +47,7 @@ Amazon S3
     read_parquet
     read_parquet_metadata
     read_parquet_table
+    select_query
     size_objects
     store_parquet_metadata
     to_csv
@@ -115,6 +121,23 @@ Amazon Athena
     stop_query_execution
     wait_query
 
+AWS Lake Formation
+------------------
+
+.. currentmodule:: awswrangler.lakeformation
+
+.. autosummary::
+    :toctree: stubs
+
+    read_sql_query
+    read_sql_table
+    cancel_transaction
+    commit_transaction
+    describe_transaction
+    extend_transaction
+    start_transaction
+    wait_query
+
 Amazon Redshift
 ---------------
 
@@ -171,6 +194,48 @@ ____________________
     read_sql_query
     read_sql_table
     to_sql
+
+Data API Redshift
+-----------------
+
+.. currentmodule:: awswrangler.data_api.redshift
+
+.. autosummary::
+    :toctree: stubs
+
+    RedshiftDataApi
+    connect
+    read_sql_query
+
+Data API RDS
+------------
+
+.. currentmodule:: awswrangler.data_api.rds
+
+.. autosummary::
+    :toctree: stubs
+
+    RdsDataApi
+    connect
+    read_sql_query
+
+OpenSearch
+----------
+
+.. currentmodule:: awswrangler.opensearch
+
+.. autosummary::
+    :toctree: stubs
+
+    connect
+    create_index
+    delete_index
+    index_csv
+    index_documents
+    index_df
+    index_json
+    search
+    search_by_sql
 
 DynamoDB
 --------

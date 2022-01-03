@@ -1,7 +1,7 @@
 """Amazon S3 Excel Read Module (PRIVATE)."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import boto3
 import pandas as pd
@@ -14,7 +14,8 @@ _logger: logging.Logger = logging.getLogger(__name__)
 
 def read_excel(
     path: str,
-    use_threads: bool = True,
+    version_id: Optional[str] = None,
+    use_threads: Union[bool, int] = True,
     boto3_session: Optional[boto3.Session] = None,
     s3_additional_kwargs: Optional[Dict[str, Any]] = None,
     **pandas_kwargs: Any,
@@ -28,16 +29,25 @@ def read_excel(
 
     Note
     ----
+    Depending on the file extension ('xlsx', 'xls', 'odf'...), an additional library
+    might have to be installed first (e.g. xlrd).
+
+    Note
+    ----
     In case of `use_threads=True` the number of threads
     that will be spawned will be gotten from os.cpu_count().
 
     Parameters
     ----------
-    path : Union[str, List[str]]
+    path : str
         S3 path (e.g. ``s3://bucket/key.xlsx``).
-    use_threads : bool
+    version_id : Optional[str]
+        Version id of the object.
+    use_threads : Union[bool, int]
         True to enable concurrent requests, False to disable multiple threads.
         If enabled os.cpu_count() will be used as the max number of threads.
+        If given an int will use the given amount of threads.
+        If integer is provided, specified number is used.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
     s3_additional_kwargs : Optional[Dict[str, Any]]
@@ -71,11 +81,11 @@ def read_excel(
     with open_s3_object(
         path=path,
         mode="rb",
+        version_id=version_id,
         use_threads=use_threads,
         s3_block_size=-1,  # One shot download
         s3_additional_kwargs=s3_additional_kwargs,
         boto3_session=session,
     ) as f:
-        pandas_kwargs["engine"] = "openpyxl"
         _logger.debug("pandas_kwargs: %s", pandas_kwargs)
         return pd.read_excel(f, **pandas_kwargs)
